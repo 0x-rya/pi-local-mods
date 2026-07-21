@@ -315,6 +315,209 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
 }'''
 
 
+TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
+        if (this.terminalOutputGuard) {
+            return;
+        }
+        const originalStderrWrite = process.stderr.write;
+        const originalConsoleError = console.error;
+        const originalConsoleWarn = console.warn;
+        const originalConsoleLog = console.log;
+        const capture = (source, args) => {
+            this.captureTerminalLog(source, `${formatConsoleArgs(...args)}\n`);
+        };
+        const stderrWrite = ((chunk, encodingOrCallback, callback) => {
+            this.captureTerminalLog("stderr", Buffer.isBuffer(chunk) ? chunk.toString(typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8") : String(chunk));
+            const cb = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+            if (cb) {
+                process.nextTick(cb);
+            }
+            return true;
+        });
+        const consoleError = (...args) => capture("console.error", args);
+        const consoleWarn = (...args) => capture("console.warn", args);
+        const consoleLog = (...args) => capture("console.log", args);
+        process.stderr.write = stderrWrite;
+        console.error = consoleError;
+        console.warn = consoleWarn;
+        console.log = consoleLog;
+        this.terminalOutputGuard = {
+            originalStderrWrite,
+            originalConsoleError,
+            originalConsoleWarn,
+            originalConsoleLog,
+            stderrWrite,
+            consoleError,
+            consoleWarn,
+            consoleLog,
+        };
+    }
+    uninstallTerminalOutputGuard(options = {}) {
+        const guard = this.terminalOutputGuard;
+        if (!guard) {
+            return;
+        }
+        if (this.capturedTerminalLogRenderTimer) {
+            clearTimeout(this.capturedTerminalLogRenderTimer);
+            this.capturedTerminalLogRenderTimer = undefined;
+        }
+        this.flushCapturedTerminalLogPartials(options.render !== false);
+        if (process.stderr.write === guard.stderrWrite) {
+            process.stderr.write = guard.originalStderrWrite;
+        }
+        if (console.error === guard.consoleError) {
+            console.error = guard.originalConsoleError;
+        }
+        if (console.warn === guard.consoleWarn) {
+            console.warn = guard.originalConsoleWarn;
+        }
+        if (console.log === guard.consoleLog) {
+            console.log = guard.originalConsoleLog;
+        }
+        this.terminalOutputGuard = undefined;
+    }
+    sanitizeCapturedTerminalLog(text) {
+        return text
+            .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+            .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+            .replace(/\x1b[_^PX][\s\S]*?(?:\x07|\x1b\\)/g, "")
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+    }
+    addCapturedTerminalLogLine(source, line) {
+        const trimmed = line.trimEnd();
+        if (trimmed.length === 0) {
+            return false;
+        }
+        this.capturedTerminalLogs.push(`[${source}] ${trimmed}`);
+        const maxStored = 50;
+        if (this.capturedTerminalLogs.length > maxStored) {
+            this.capturedTerminalLogs.splice(0, this.capturedTerminalLogs.length - maxStored);
+        }
+        return true;
+    }
+    captureTerminalLog(source, text) {
+        if (!this.isInitialized && !this.fixedLayout) {
+            return;
+        }
+        const sanitized = this.sanitizeCapturedTerminalLog(text).replace(/\r/g, "\n");
+        const combined = (this.capturedTerminalLogPartials.get(source) ?? "") + sanitized;
+        const parts = combined.split("\n");
+        let partial = parts.pop() ?? "";
+        let changed = false;
+        for (const part of parts) {
+            changed = this.addCapturedTerminalLogLine(source, part) || changed;
+        }
+        if (partial.length > 4000) {
+            changed = this.addCapturedTerminalLogLine(source, partial) || changed;
+            partial = "";
+        }
+        if (partial) {
+            this.capturedTerminalLogPartials.set(source, partial);
+        }
+        else {
+            this.capturedTerminalLogPartials.delete(source);
+        }
+        if (changed) {
+            this.scheduleCapturedTerminalLogRender();
+        }
+    }
+    flushCapturedTerminalLogPartials(render = true) {
+        let changed = false;
+        for (const [source, partial] of this.capturedTerminalLogPartials) {
+            changed = this.addCapturedTerminalLogLine(source, partial) || changed;
+        }
+        this.capturedTerminalLogPartials.clear();
+        if (changed && render) {
+            this.renderCapturedTerminalLogs();
+        }
+    }
+    scheduleCapturedTerminalLogRender() {
+        if (this.capturedTerminalLogRenderTimer) {
+            return;
+        }
+        this.capturedTerminalLogRenderTimer = setTimeout(() => {
+            this.capturedTerminalLogRenderTimer = undefined;
+            this.renderCapturedTerminalLogs();
+        }, 50);
+    }
+    renderCapturedTerminalLogs() {
+        this.terminalLogContainer.clear();
+        if (this.capturedTerminalLogs.length === 0) {
+            this.capturedTerminalLogComponent = undefined;
+            this.ui.requestRender();
+            return;
+        }
+        const getLogs = () => this.capturedTerminalLogs.slice();
+        this.capturedTerminalLogComponent = {
+            render: (width) => {
+                if (width <= 0) {
+                    return [];
+                }
+                const logs = getLogs();
+                const maxShown = 8;
+                const shown = logs.slice(-maxShown);
+                const hidden = Math.max(0, logs.length - shown.length);
+                const title = `Captured terminal logs (${shown.length}${hidden ? ` shown, ${hidden} hidden` : ""})`;
+                const truncatedTitle = visibleWidth(title) > width ? (width <= 1 ? "…" : `${sliceByColumn(title, 0, width - 1, true)}…`) : title;
+                const lines = [theme.fg("warning", truncatedTitle)];
+                const prefix = width >= 4 ? "│ " : "";
+                const available = Math.max(0, width - visibleWidth(prefix));
+                for (const line of shown) {
+                    const truncated = visibleWidth(line) > available ? (available <= 1 ? "…" : `${sliceByColumn(line, 0, available - 1, true)}…`) : line;
+                    lines.push(theme.fg("dim", prefix) + theme.fg("warning", truncated));
+                }
+                return lines;
+            },
+            invalidate: () => { },
+        };
+        this.terminalLogContainer.addChild(this.capturedTerminalLogComponent);
+        this.ui.requestRender();
+    }
+'''
+
+
+def patch_terminal_log_guard(text: str) -> str:
+    if 'import { format as formatConsoleArgs } from "node:util";' not in text:
+        text = text.replace('import * as path from "node:path";', 'import * as path from "node:path";\nimport { format as formatConsoleArgs } from "node:util";')
+    if 'terminalLogContainer;' not in text:
+        text = text.replace('    pendingMessagesContainer;\n    statusContainer;', '    pendingMessagesContainer;\n    terminalLogContainer;\n    statusContainer;')
+    if 'capturedTerminalLogs = [];' not in text:
+        text = text.replace(
+            '    // Extension UI state\n    extensionSelector = undefined;',
+            '    // Captured terminal logs (stderr/console) rendered through the TUI so raw logs cannot cover the editor/footer.\n'
+            '    capturedTerminalLogs = [];\n'
+            '    capturedTerminalLogComponent = undefined;\n'
+            '    capturedTerminalLogPartials = new Map();\n'
+            '    capturedTerminalLogRenderTimer = undefined;\n'
+            '    terminalOutputGuard = undefined;\n'
+            '    // Extension UI state\n    extensionSelector = undefined;'
+        )
+    if 'this.terminalLogContainer = new Container();' not in text:
+        text = text.replace('        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.statusContainer = new Container();', '        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.terminalLogContainer = new Container();\n        this.statusContainer = new Container();')
+    text = text.replace(
+        '        ], [\n            this.statusContainer,\n            this.widgetContainerAbove,',
+        '        ], [\n            this.terminalLogContainer,\n            this.statusContainer,\n            this.widgetContainerAbove,'
+    )
+    if 'this.installTerminalOutputGuard();\n        this.ui.start();' not in text:
+        text = text.replace('        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.ui.start();', '        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.installTerminalOutputGuard();\n        this.ui.start();')
+    if 'this.uninstallTerminalOutputGuard();\n            this.ui.stop();' not in text:
+        text = text.replace('            // Stop TUI to release terminal\n            this.ui.stop();', '            // Stop TUI to release terminal\n            this.uninstallTerminalOutputGuard();\n            this.ui.stop();')
+    if 'this.installTerminalOutputGuard();\n            this.ui.start();' not in text:
+        text = text.replace('            // Restart TUI\n            this.ui.start();', '            // Restart TUI\n            this.installTerminalOutputGuard();\n            this.ui.start();')
+    if 'this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");' not in text:
+        text = text.replace('        console.error("pi exiting due to uncaughtException:");', '        this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");')
+    if 'installTerminalOutputGuard() {' not in text:
+        text = text.replace(
+            '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n    showNewVersionNotification(release) {',
+            '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n'
+            + TERMINAL_LOG_GUARD_METHODS
+            + '    showNewVersionNotification(release) {'
+        )
+    if 'this.uninstallTerminalOutputGuard();\n        if (this.settingsManager.getShowTerminalProgress()) {' not in text:
+        text = text.replace('        if (this.settingsManager.getShowTerminalProgress()) {\n            this.ui.terminal.setProgress(false);', '        this.uninstallTerminalOutputGuard();\n        if (this.settingsManager.getShowTerminalProgress()) {\n            this.ui.terminal.setProgress(false);')
+    return text
+
+
 def backup(path: Path) -> None:
     if not path.exists():
         raise SystemExit(f"Missing expected file: {path}")
@@ -332,6 +535,7 @@ def patch_interactive() -> None:
     )
     if 'sliceByColumn, } from "@earendil-works/pi-tui";' not in text:
         raise SystemExit("Could not patch pi-tui import in interactive-mode.js")
+    text = patch_terminal_log_guard(text)
     start = text.index("class FixedBottomScrollLayout {")
     end = text.index("\nfunction isCustomSessionEntry", start)
     INTERACTIVE.write_text(text[:start] + FIXED_BOTTOM_SCROLL_LAYOUT + text[end:])
