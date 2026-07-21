@@ -388,7 +388,12 @@ TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
         if (trimmed.length === 0) {
             return false;
         }
-        this.capturedTerminalLogs.push(`[${source}] ${trimmed}`);
+        this.capturedTerminalLogs.push({
+            id: this.capturedTerminalLogNextId++,
+            source,
+            text: trimmed,
+            expanded: false,
+        });
         const maxStored = 50;
         if (this.capturedTerminalLogs.length > maxStored) {
             this.capturedTerminalLogs.splice(0, this.capturedTerminalLogs.length - maxStored);
@@ -440,31 +445,135 @@ TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
             this.renderCapturedTerminalLogs();
         }, 50);
     }
+    wrapCapturedTerminalLogLine(text, width) {
+        const lines = [];
+        let remaining = text;
+        while (visibleWidth(remaining) > width) {
+            lines.push(sliceByColumn(remaining, 0, width, true));
+            remaining = sliceByColumn(remaining, width, Math.max(0, visibleWidth(remaining) - width), true);
+        }
+        lines.push(remaining);
+        return lines;
+    }
+    removeCapturedTerminalLog(id) {
+        this.capturedTerminalLogs = this.capturedTerminalLogs.filter((entry) => entry.id !== id);
+        this.renderCapturedTerminalLogs();
+    }
+    toggleCapturedTerminalLog(id) {
+        const entry = this.capturedTerminalLogs.find((item) => item.id === id);
+        if (entry) {
+            entry.expanded = !entry.expanded;
+            this.renderCapturedTerminalLogs();
+        }
+    }
+    copyCapturedTerminalLog(id) {
+        const entry = this.capturedTerminalLogs.find((item) => item.id === id);
+        if (entry) {
+            void copyToClipboard(`[${entry.source}] ${entry.text}`);
+        }
+    }
+    clearCapturedTerminalLogs() {
+        this.capturedTerminalLogs = [];
+        this.capturedTerminalLogPartials.clear();
+        this.renderCapturedTerminalLogs();
+    }
+    handleCapturedTerminalLogInput(data) {
+        const mouseMatch = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([mM])$/);
+        if (!mouseMatch || mouseMatch[4] !== "M") {
+            return undefined;
+        }
+        const button = Number(mouseMatch[1]);
+        if ((button & 3) !== 0 || (button & 64) !== 0) {
+            return undefined;
+        }
+        if (!this.capturedTerminalLogComponent || !this.fixedLayout) {
+            return undefined;
+        }
+        const x = Number(mouseMatch[2]) - 1;
+        const y = Number(mouseMatch[3]) - 1;
+        const width = this.ui.terminal?.columns ?? 80;
+        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
+        const pinnedLines = this.fixedLayout.renderChildren(this.fixedLayout.pinnedChildren, width);
+        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
+        const visiblePinnedStart = Math.max(0, pinnedLines.length - pinnedRows);
+        const localRow = y - (termRows - pinnedRows) + visiblePinnedStart;
+        const hit = this.capturedTerminalLogHitRegions.find((region) => region.row === localRow && x >= region.startCol && x < region.endCol);
+        if (!hit) {
+            return undefined;
+        }
+        if (hit.type === "clear") {
+            this.clearCapturedTerminalLogs();
+        }
+        else if (hit.type === "close") {
+            this.removeCapturedTerminalLog(hit.id);
+        }
+        else if (hit.type === "copy") {
+            this.copyCapturedTerminalLog(hit.id);
+        }
+        else if (hit.type === "toggle") {
+            this.toggleCapturedTerminalLog(hit.id);
+        }
+        return { consume: true };
+    }
     renderCapturedTerminalLogs() {
         this.terminalLogContainer.clear();
         if (this.capturedTerminalLogs.length === 0) {
             this.capturedTerminalLogComponent = undefined;
+            this.capturedTerminalLogHitRegions = [];
             this.ui.requestRender();
             return;
         }
         const getLogs = () => this.capturedTerminalLogs.slice();
         this.capturedTerminalLogComponent = {
             render: (width) => {
+                this.capturedTerminalLogHitRegions = [];
                 if (width <= 0) {
                     return [];
                 }
+                const fit = (line) => visibleWidth(line) > width ? sliceByColumn(line, 0, width, true) : line;
                 const logs = getLogs();
                 const maxShown = 8;
                 const shown = logs.slice(-maxShown);
                 const hidden = Math.max(0, logs.length - shown.length);
+                const closeAll = width >= 8 ? " [×]" : "";
                 const title = `Captured terminal logs (${shown.length}${hidden ? ` shown, ${hidden} hidden` : ""})`;
-                const truncatedTitle = visibleWidth(title) > width ? (width <= 1 ? "…" : `${sliceByColumn(title, 0, width - 1, true)}…`) : title;
-                const lines = [theme.fg("warning", truncatedTitle)];
-                const prefix = width >= 4 ? "│ " : "";
-                const available = Math.max(0, width - visibleWidth(prefix));
-                for (const line of shown) {
-                    const truncated = visibleWidth(line) > available ? (available <= 1 ? "…" : `${sliceByColumn(line, 0, available - 1, true)}…`) : line;
-                    lines.push(theme.fg("dim", prefix) + theme.fg("warning", truncated));
+                const titleWidth = Math.max(0, width - visibleWidth(closeAll));
+                const truncatedTitle = visibleWidth(title) > titleWidth ? (titleWidth <= 1 ? "…" : `${sliceByColumn(title, 0, titleWidth - 1, true)}…`) : title;
+                const header = theme.fg("warning", truncatedTitle) + theme.fg("dim", closeAll);
+                if (closeAll) {
+                    const headerCloseStart = visibleWidth(truncatedTitle) + 1;
+                    this.capturedTerminalLogHitRegions.push({ type: "clear", row: 0, startCol: headerCloseStart, endCol: Math.min(width, headerCloseStart + 3) });
+                }
+                const lines = [fit(header)];
+                let row = 1;
+                for (const entry of shown) {
+                    if (entry.expanded) {
+                        const controls = "× ▾ [copy] ";
+                        const head = `${entry.source}: ${entry.text}`;
+                        const headAvailable = Math.max(0, width - visibleWidth(controls));
+                        const headText = visibleWidth(head) > headAvailable ? (headAvailable <= 1 ? "…" : `${sliceByColumn(head, 0, headAvailable - 1, true)}…`) : head;
+                        lines.push(fit(theme.fg("dim", "×") + " " + theme.fg("warning", "▾") + " " + theme.fg("accent", "[copy]") + " " + theme.fg("warning", headText)));
+                        this.capturedTerminalLogHitRegions.push({ type: "close", id: entry.id, row, startCol: 0, endCol: 1 });
+                        this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 2, endCol: width });
+                        this.capturedTerminalLogHitRegions.push({ type: "copy", id: entry.id, row, startCol: 4, endCol: 10 });
+                        row++;
+                        const bodyPrefix = "  │ ";
+                        const bodyWidth = Math.max(1, width - visibleWidth(bodyPrefix));
+                        for (const wrapped of this.wrapCapturedTerminalLogLine(entry.text, bodyWidth)) {
+                            lines.push(fit(theme.fg("dim", bodyPrefix) + theme.fg("warning", wrapped)));
+                            row++;
+                        }
+                    }
+                    else {
+                        const controls = "× ▸ ";
+                        const text = `${entry.source}: ${entry.text}`;
+                        const available = Math.max(0, width - visibleWidth(controls));
+                        const truncated = visibleWidth(text) > available ? (available <= 1 ? "…" : `${sliceByColumn(text, 0, available - 1, true)}…`) : text;
+                        lines.push(fit(theme.fg("dim", "×") + " " + theme.fg("warning", "▸") + " " + theme.fg("warning", truncated)));
+                        this.capturedTerminalLogHitRegions.push({ type: "close", id: entry.id, row, startCol: 0, endCol: 1 });
+                        this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 2, endCol: width });
+                        row++;
+                    }
                 }
                 return lines;
             },
@@ -486,12 +595,16 @@ def patch_terminal_log_guard(text: str) -> str:
             '    // Extension UI state\n    extensionSelector = undefined;',
             '    // Captured terminal logs (stderr/console) rendered through the TUI so raw logs cannot cover the editor/footer.\n'
             '    capturedTerminalLogs = [];\n'
+            '    capturedTerminalLogNextId = 1;\n'
             '    capturedTerminalLogComponent = undefined;\n'
+            '    capturedTerminalLogHitRegions = [];\n'
             '    capturedTerminalLogPartials = new Map();\n'
             '    capturedTerminalLogRenderTimer = undefined;\n'
             '    terminalOutputGuard = undefined;\n'
             '    // Extension UI state\n    extensionSelector = undefined;'
         )
+    if 'capturedTerminalLogNextId = 1;' not in text:
+        text = text.replace('    capturedTerminalLogs = [];\n    capturedTerminalLogComponent = undefined;\n    capturedTerminalLogPartials = new Map();', '    capturedTerminalLogs = [];\n    capturedTerminalLogNextId = 1;\n    capturedTerminalLogComponent = undefined;\n    capturedTerminalLogHitRegions = [];\n    capturedTerminalLogPartials = new Map();')
     if 'this.terminalLogContainer = new Container();' not in text:
         text = text.replace('        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.statusContainer = new Container();', '        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.terminalLogContainer = new Container();\n        this.statusContainer = new Container();')
     text = text.replace(
@@ -500,13 +613,19 @@ def patch_terminal_log_guard(text: str) -> str:
     )
     if 'this.installTerminalOutputGuard();\n        this.ui.start();' not in text:
         text = text.replace('        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.ui.start();', '        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.installTerminalOutputGuard();\n        this.ui.start();')
+    if 'this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));' not in text:
+        text = text.replace('        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));', '        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));\n        this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));')
     if 'this.uninstallTerminalOutputGuard();\n            this.ui.stop();' not in text:
         text = text.replace('            // Stop TUI to release terminal\n            this.ui.stop();', '            // Stop TUI to release terminal\n            this.uninstallTerminalOutputGuard();\n            this.ui.stop();')
     if 'this.installTerminalOutputGuard();\n            this.ui.start();' not in text:
         text = text.replace('            // Restart TUI\n            this.ui.start();', '            // Restart TUI\n            this.installTerminalOutputGuard();\n            this.ui.start();')
     if 'this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");' not in text:
         text = text.replace('        console.error("pi exiting due to uncaughtException:");', '        this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");')
-    if 'installTerminalOutputGuard() {' not in text:
+    if 'installTerminalOutputGuard() {' in text:
+        guard_start = text.index('    installTerminalOutputGuard() {')
+        guard_end = text.index('    showNewVersionNotification(release) {', guard_start)
+        text = text[:guard_start] + TERMINAL_LOG_GUARD_METHODS + text[guard_end:]
+    else:
         text = text.replace(
             '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n    showNewVersionNotification(release) {',
             '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n'
