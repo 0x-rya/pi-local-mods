@@ -17,6 +17,14 @@ These are intentionally **not** implemented as a Pi extension because the useful
 
 Restart Pi after applying.
 
+## Test
+
+The test suite applies patches to committed fixtures, not to the live Pi install:
+
+```bash
+python3 -m unittest scripts/test_apply.py
+```
+
 ## Selection UX
 
 - Wheel/trackpad scroll: scrolls transcript

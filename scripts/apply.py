@@ -660,10 +660,84 @@ def patch_interactive() -> None:
     )
     if 'sliceByColumn, } from "@earendil-works/pi-tui";' not in text:
         raise SystemExit("Could not patch pi-tui import in interactive-mode.js")
+
+    # Pi <=0.80 already had our layout class in the patched file; Pi 0.81 no
+    # longer has it after upgrades. Replace it when present, otherwise insert it
+    # before the first helper after InteractiveMode's top-level declarations.
+    if "class FixedBottomScrollLayout {" in text:
+        start = text.index("class FixedBottomScrollLayout {")
+        end = text.index("\nfunction isCustomSessionEntry", start)
+        text = text[:start] + FIXED_BOTTOM_SCROLL_LAYOUT + text[end:]
+    else:
+        marker = "function isCustomSessionEntry"
+        if marker not in text:
+            raise SystemExit("Could not find insertion point for FixedBottomScrollLayout")
+        text = text.replace(marker, FIXED_BOTTOM_SCROLL_LAYOUT + "\n" + marker, 1)
+
     text = patch_terminal_log_guard(text)
-    start = text.index("class FixedBottomScrollLayout {")
-    end = text.index("\nfunction isCustomSessionEntry", start)
-    INTERACTIVE.write_text(text[:start] + FIXED_BOTTOM_SCROLL_LAYOUT + text[end:])
+
+    if "    fixedLayout;" not in text:
+        text = text.replace(
+            "    terminalLogContainer;\n    statusContainer;",
+            "    terminalLogContainer;\n    statusContainer;\n    fixedLayout;",
+        )
+    fixed_layout_assignment = (
+        "        this.fixedLayout = new FixedBottomScrollLayout(this.ui, [\n"
+        "            this.headerContainer,\n"
+        "            this.loadedResourcesContainer,\n"
+        "            this.chatContainer,\n"
+        "        ], [\n"
+        "            this.pendingMessagesContainer,\n"
+        "            this.terminalLogContainer,\n"
+        "            this.statusContainer,\n"
+        "            this.widgetContainerAbove,\n"
+        "            this.editorContainer,\n"
+        "            this.widgetContainerBelow,\n"
+        "            this.footer,\n"
+        "        ]);"
+    )
+    if "this.fixedLayout = new FixedBottomScrollLayout(" not in text:
+        text = text.replace(
+            "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);",
+            "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
+            + fixed_layout_assignment,
+            1,
+        )
+    # A previous buggy local patch inserted the layout assignment into
+    # applyRuntimeSettings() too. Keep the constructor assignment only.
+    text = text.replace(
+        "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
+        + fixed_layout_assignment
+        + "\n        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
+        "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
+        "        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
+    )
+    old_children = '''        this.ui.addChild(this.headerContainer);
+        this.ui.addChild(this.loadedResourcesContainer);
+        this.ui.addChild(this.chatContainer);
+        this.ui.addChild(this.pendingMessagesContainer);
+        this.ui.addChild(this.statusContainer);
+        this.renderWidgets(); // Initialize with default spacer
+        this.ui.addChild(this.widgetContainerAbove);
+        this.ui.addChild(this.editorContainer);
+        this.ui.addChild(this.widgetContainerBelow);
+        this.ui.addChild(this.footer);'''
+    if old_children in text:
+        text = text.replace(
+            old_children,
+            '''        this.ui.addChild(this.fixedLayout);
+        this.renderWidgets(); // Initialize with default spacer''',
+            1,
+        )
+    if "this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));" not in text:
+        text = text.replace(
+            "        this.setupEditorSubmitHandler();",
+            "        this.setupEditorSubmitHandler();\n"
+            "        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));\n"
+            "        this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));",
+            1,
+        )
+    INTERACTIVE.write_text(text)
 
 
 def patch_terminal() -> None:
