@@ -26,6 +26,9 @@ def find_pi_package() -> Path:
 PI_PACKAGE = find_pi_package()
 INTERACTIVE = PI_PACKAGE / "dist/modes/interactive/interactive-mode.js"
 TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
+BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
+BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
+BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
 
 FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
     ui;
@@ -680,6 +683,45 @@ def patch_terminal() -> None:
     TERMINAL.write_text(text)
 
 
+def patch_bg_tasks_shortcuts() -> None:
+    if not BG_TASKS_PACKAGE.exists():
+        return
+
+    backup(BG_TASKS_SHORTCUTS)
+    shortcuts = BG_TASKS_SHORTCUTS.read_text()
+    shortcuts = shortcuts.replace(
+        " *   - Ctrl+B (and Ctrl+Shift+B alias): move the foreground bash to background\n",
+        " *   - Ctrl+Shift+B: move the foreground bash to background\n",
+    )
+    shortcuts = shortcuts.replace(
+        '''    // Primary background shortcut — Ctrl+B, matching Claude Code. Inside a tmux\n    // session Ctrl+B is tmux's prefix key and must be pressed twice; the live\n    // hint shown while a command runs says so.\n    pi.registerShortcut("ctrl+b", {\n        description: "Background the current foreground process",\n        handler: async (ctx) => handleCtrlB(reg, pi, ctx),\n    });\n\n    // Alias for muscle memory / terminals that remap Ctrl+B.\n    pi.registerShortcut("ctrl+shift+b", {\n        description: "Background the current foreground process (alias for Ctrl+B)",\n        handler: async (ctx) => handleCtrlB(reg, pi, ctx),\n    });\n''',
+        '''    // Primary background shortcut. Ctrl+B is reserved by Pi's built-in editor\n    // cursor-left binding, so use Ctrl+Shift+B to avoid shortcut conflicts.\n    pi.registerShortcut("ctrl+shift+b", {\n        description: "Background the current foreground process",\n        handler: async (ctx) => handleCtrlB(reg, pi, ctx),\n    });\n''',
+    )
+    shortcuts = shortcuts.replace(
+        " * Ctrl+B / Ctrl+Shift+B handler — hand control back to the agent (Claude Code\n",
+        " * Ctrl+Shift+B handler — hand control back to the agent (Claude Code\n",
+    )
+    if 'pi.registerShortcut("ctrl+b"' in shortcuts:
+        raise SystemExit("Could not remove pi-patty-bg-tasks ctrl+b shortcut registration")
+    if 'pi.registerShortcut("ctrl+shift+b"' not in shortcuts:
+        raise SystemExit("Could not verify pi-patty-bg-tasks ctrl+shift+b shortcut registration")
+    BG_TASKS_SHORTCUTS.write_text(shortcuts)
+
+    backup(BG_TASKS_HINT)
+    hint = BG_TASKS_HINT.read_text()
+    hint = hint.replace(
+        ' * Live "(ctrl+b to run in background)" hint shown below the editor while a\n',
+        ' * Live "(ctrl+shift+b to run in background)" hint shown below the editor while a\n',
+    )
+    hint = hint.replace(
+        ''' * The key to press to background, as shown in the hint. Inside a tmux session\n * `ctrl+b` is tmux's prefix key, so it must be pressed twice — Claude Code\n * shows the same "(twice)" note.\n */\nfunction backgroundHintLabel(): string {\n    return process.env.TMUX\n        ? "ctrl+b ctrl+b (twice) to run in background"\n        : "ctrl+b to run in background";\n}\n''',
+        ''' * The key to press to background, as shown in the hint.\n */\nfunction backgroundHintLabel(): string {\n    return "ctrl+shift+b to run in background";\n}\n''',
+    )
+    if 'ctrl+b to run in background' in hint or 'ctrl+b ctrl+b' in hint:
+        raise SystemExit("Could not update pi-patty-bg-tasks background hint")
+    BG_TASKS_HINT.write_text(hint)
+
+
 def install_theme() -> None:
     theme_dir = PI_AGENT_DIR / "themes"
     theme_dir.mkdir(parents=True, exist_ok=True)
@@ -702,6 +744,7 @@ def verify() -> None:
 def main() -> None:
     patch_interactive()
     patch_terminal()
+    patch_bg_tasks_shortcuts()
     install_theme()
     verify()
     print("Applied pi-local-mods. Restart pi to use the patched runtime.")
