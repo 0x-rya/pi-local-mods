@@ -25,6 +25,9 @@ def find_pi_package() -> Path:
 
 PI_PACKAGE = find_pi_package()
 INTERACTIVE = PI_PACKAGE / "dist/modes/interactive/interactive-mode.js"
+CLIPBOARD_IMAGE = PI_PACKAGE / "dist/utils/clipboard-image.js"
+FOOTER = PI_PACKAGE / "dist/modes/interactive/components/footer.js"
+CUSTOM_EDITOR = PI_PACKAGE / "dist/modes/interactive/components/custom-editor.js"
 TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
@@ -651,6 +654,396 @@ def backup(path: Path) -> None:
         shutil.copy2(path, bak)
 
 
+def patch_clipboard_image_attachments(text: str) -> str:
+    if 'import { processImage } from "../../utils/image-process.js";' not in text:
+        text = text.replace(
+            'import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.js";',
+            'import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.js";\nimport { processImage } from "../../utils/image-process.js";',
+        )
+    if 'import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";' not in text:
+        text = text.replace(
+            'import { processImage } from "../../utils/image-process.js";',
+            'import { processImage } from "../../utils/image-process.js";\nimport { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";',
+        )
+    if 'pendingClipboardImages = [];' not in text:
+        text = text.replace(
+            '    pendingUserInputs = [];\n    activeStatusIndicator = undefined;',
+            '    pendingUserInputs = [];\n    pendingClipboardImages = [];\n    convertingImagePathPaste = false;\n    activeStatusIndicator = undefined;',
+        )
+    if 'convertingImagePathPaste = false;' not in text:
+        text = text.replace(
+            '    pendingClipboardImages = [];\n    activeStatusIndicator = undefined;',
+            '    pendingClipboardImages = [];\n    convertingImagePathPaste = false;\n    activeStatusIndicator = undefined;',
+        )
+    old_run_loop = '''        // Main interactive loop
+        while (true) {
+            const userInput = await this.getUserInput();
+            try {
+                await this.session.prompt(userInput);
+            }
+            catch (error) {
+                const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+                this.showError(errorMessage);
+            }
+        }
+'''
+    new_run_loop = '''        // Main interactive loop
+        while (true) {
+            const userInput = await this.getUserInput();
+            const inputText = typeof userInput === "string" ? userInput : userInput.text;
+            const inputOptions = typeof userInput === "string" || !userInput.images ? undefined : { images: userInput.images };
+            try {
+                await this.session.prompt(inputText, inputOptions);
+            }
+            catch (error) {
+                const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+                this.showError(errorMessage);
+            }
+        }
+'''
+    if old_run_loop in text:
+        text = text.replace(old_run_loop, new_run_loop, 1)
+    old_paste = '''    async handleClipboardPaste() {
+        try {
+            const image = await readClipboardImage();
+            if (image) {
+                const tmpDir = os.tmpdir();
+                const ext = extensionForImageMimeType(image.mimeType) ?? "png";
+                const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
+                const filePath = path.join(tmpDir, fileName);
+                fs.writeFileSync(filePath, Buffer.from(image.bytes));
+                this.editor.insertTextAtCursor?.(filePath);
+                this.ui.requestRender();
+                return;
+            }
+            const text = await readClipboardText();
+            if (text) {
+                this.editor.insertTextAtCursor?.(text);
+                this.ui.requestRender();
+            }
+        }
+        catch {
+            // Silently ignore clipboard errors (may not have permission, etc.)
+        }
+    }
+'''
+    new_paste = r'''    async handleClipboardPaste() {
+        try {
+            const image = await readClipboardImage();
+            if (image) {
+                const ext = extensionForImageMimeType(image.mimeType) ?? "png";
+                const fileName = `clipboard-${crypto.randomUUID().slice(0, 8)}.${ext}`;
+                const marker = `[image:${fileName}]`;
+                const processed = await processImage(Buffer.from(image.bytes), image.mimeType, {
+                    autoResizeImages: this.settingsManager.getImageAutoResize(),
+                });
+                if (processed.ok) {
+                    this.pendingClipboardImages.push({
+                        marker,
+                        image: { type: "image", data: processed.data, mimeType: processed.mimeType },
+                    });
+                    this.editor.insertTextAtCursor?.(`${marker} `);
+                    if (processed.hints.length > 0) {
+                        this.showStatus(processed.hints.join(" "));
+                    }
+                    this.ui.requestRender();
+                    return;
+                }
+                // Fallback to the old path insertion behavior if image processing fails.
+                const tmpDir = os.tmpdir();
+                const fallbackFileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
+                const filePath = path.join(tmpDir, fallbackFileName);
+                fs.writeFileSync(filePath, Buffer.from(image.bytes));
+                this.editor.insertTextAtCursor?.(filePath);
+                this.showWarning(processed.message);
+                this.ui.requestRender();
+                return;
+            }
+            const text = await readClipboardText();
+            if (text) {
+                this.editor.insertTextAtCursor?.(text);
+                this.ui.requestRender();
+            }
+        }
+        catch {
+            // Silently ignore clipboard errors (may not have permission, etc.)
+        }
+    }
+    normalizeImagePathCandidate(candidate) {
+        let value = candidate.trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        if (value.startsWith("file://")) {
+            try {
+                value = decodeURIComponent(new URL(value).pathname);
+            }
+            catch {
+                value = value.slice("file://".length);
+            }
+        }
+        value = value.replace(/\\([\\ ()'\[\]&;])/g, "$1");
+        if (value.startsWith("~/")) {
+            value = path.join(os.homedir(), value.slice(2));
+        }
+        return value;
+    }
+    extractImagePathMatches(text) {
+        const matches = [];
+        const seen = new Set();
+        const patterns = [
+            /file:\/\/[^\s]+\.(?:png|jpe?g|webp|gif)\b/gi,
+            /"(?:[^"\\]|\\.)+\.(?:png|jpe?g|webp|gif)"/gi,
+            /'(?:[^'\\]|\\.)+\.(?:png|jpe?g|webp|gif)'/gi,
+            /(?:~\/|\/)(?:\\.|[^\r\n])+?\.(?:png|jpe?g|webp|gif)\b/gi,
+        ];
+        for (const pattern of patterns) {
+            for (const match of text.matchAll(pattern)) {
+                const raw = match[0];
+                const filePath = this.normalizeImagePathCandidate(raw);
+                const key = `${raw}\n${filePath}`;
+                if (filePath && !seen.has(key)) {
+                    seen.add(key);
+                    matches.push({ raw, filePath });
+                }
+            }
+        }
+        return matches;
+    }
+    extractImagePathCandidates(text) {
+        return [...new Set(this.extractImagePathMatches(text).map((match) => match.filePath))];
+    }
+    async attachImageFilePath(filePath, label) {
+        if (!fs.existsSync(filePath)) {
+            return undefined;
+        }
+        const mimeType = await detectSupportedImageMimeTypeFromFile(filePath);
+        if (!mimeType) {
+            return undefined;
+        }
+        const processed = await processImage(fs.readFileSync(filePath), mimeType, {
+            autoResizeImages: this.settingsManager.getImageAutoResize(),
+        });
+        if (!processed.ok) {
+            return undefined;
+        }
+        const safeLabel = label.replace(/[\]\n\r]/g, "_") || `dropped-${crypto.randomUUID().slice(0, 8)}`;
+        const marker = `[image:${safeLabel}]`;
+        this.pendingClipboardImages.push({
+            marker,
+            image: { type: "image", data: processed.data, mimeType: processed.mimeType },
+        });
+        if (processed.hints.length > 0) {
+            this.showStatus(processed.hints.join(" "));
+        }
+        return marker;
+    }
+    async convertDroppedImagePaths(text) {
+        if (this.convertingImagePathPaste || !text || text.includes("[image:")) {
+            return;
+        }
+        const matches = this.extractImagePathMatches(text);
+        if (matches.length === 0) {
+            return;
+        }
+        let nextText = text;
+        let converted = false;
+        for (const match of matches) {
+            try {
+                const marker = await this.attachImageFilePath(match.filePath, path.basename(match.filePath));
+                if (!marker) {
+                    continue;
+                }
+                nextText = nextText.split(match.raw).join(marker);
+                converted = true;
+            }
+            catch {
+                // Leave the dropped path untouched if conversion fails.
+            }
+        }
+        if (converted && nextText !== text) {
+            this.convertingImagePathPaste = true;
+            this.editor.setText(nextText);
+            this.convertingImagePathPaste = false;
+            this.ui.requestRender();
+        }
+    }
+    async prepareClipboardImageSubmission(text) {
+        const images = [];
+        const remaining = [];
+        for (const attachment of this.pendingClipboardImages) {
+            if (text.includes(attachment.marker)) {
+                images.push(attachment.image);
+            }
+            else {
+                remaining.push(attachment);
+            }
+        }
+        this.pendingClipboardImages = remaining;
+        for (const filePath of this.extractImagePathCandidates(text)) {
+            try {
+                if (!fs.existsSync(filePath)) {
+                    continue;
+                }
+                const mimeType = await detectSupportedImageMimeTypeFromFile(filePath);
+                if (!mimeType) {
+                    continue;
+                }
+                const processed = await processImage(fs.readFileSync(filePath), mimeType, {
+                    autoResizeImages: this.settingsManager.getImageAutoResize(),
+                });
+                if (processed.ok) {
+                    images.push({ type: "image", data: processed.data, mimeType: processed.mimeType });
+                    if (processed.hints.length > 0) {
+                        this.showStatus(processed.hints.join(" "));
+                    }
+                }
+            }
+            catch {
+                // Keep the path text as a normal prompt reference if direct attachment fails.
+            }
+        }
+        return { text, images: images.length > 0 ? images : undefined };
+    }
+'''
+    if old_paste in text:
+        text = text.replace(old_paste, new_paste, 1)
+    old_prepare = '''    prepareClipboardImageSubmission(text) {
+        if (this.pendingClipboardImages.length === 0) {
+            return { text };
+        }
+        const images = [];
+        const remaining = [];
+        for (const attachment of this.pendingClipboardImages) {
+            if (text.includes(attachment.marker)) {
+                images.push(attachment.image);
+            }
+            else {
+                remaining.push(attachment);
+            }
+        }
+        this.pendingClipboardImages = remaining;
+        return { text, images: images.length > 0 ? images : undefined };
+    }
+'''
+    marker = '    setupEditorSubmitHandler() {'
+    helper_start = new_paste.index('    normalizeImagePathCandidate(candidate) {')
+    helper_text = new_paste[helper_start:]
+    if '    normalizeImagePathCandidate(candidate) {' in text and marker in text:
+        start = text.index('    normalizeImagePathCandidate(candidate) {')
+        end = text.index(marker, start)
+        text = text[:start] + helper_text + text[end:]
+    elif old_prepare in text:
+        text = text.replace(old_prepare, helper_text, 1)
+    elif 'async prepareClipboardImageSubmission(text)' not in text and marker in text:
+        text = text.replace(marker, helper_text + marker, 1)
+    old_on_change = '''        this.defaultEditor.onChange = (text) => {
+            const wasBashMode = this.isBashMode;
+            this.isBashMode = text.trimStart().startsWith("!");
+            if (wasBashMode !== this.isBashMode) {
+                this.updateEditorBorderColor();
+            }
+        };
+'''
+    new_on_change = '''        this.defaultEditor.onChange = (text) => {
+            const wasBashMode = this.isBashMode;
+            this.isBashMode = text.trimStart().startsWith("!");
+            if (wasBashMode !== this.isBashMode) {
+                this.updateEditorBorderColor();
+            }
+            if (!this.convertingImagePathPaste) {
+                void this.convertDroppedImagePaths(text);
+            }
+        };
+'''
+    if old_on_change in text:
+        text = text.replace(old_on_change, new_on_change, 1)
+    old_submit = '''            // Queue input during compaction (extension commands execute immediately)
+            if (this.session.isCompacting) {
+                if (this.isExtensionCommand(text)) {
+                    this.editor.addToHistory?.(text);
+                    this.editor.setText("");
+                    await this.session.prompt(text);
+                }
+                else {
+                    this.queueCompactionMessage(text, "steer");
+                }
+                return;
+            }
+            // If streaming, use prompt() with steer behavior
+            // This handles extension commands (execute immediately), prompt template expansion, and queueing
+            if (this.session.isStreaming) {
+                this.editor.addToHistory?.(text);
+                this.editor.setText("");
+                await this.session.prompt(text, { streamingBehavior: "steer" });
+                this.updatePendingMessagesDisplay();
+                this.ui.requestRender();
+                return;
+            }
+            // Normal message submission
+            // First, move any pending bash components to chat
+            this.flushPendingBashComponents();
+            if (this.onInputCallback) {
+                this.onInputCallback(text);
+            }
+            else {
+                this.pendingUserInputs.push(text);
+            }
+            this.editor.addToHistory?.(text);
+'''
+    new_submit = '''            // Queue input during compaction (extension commands execute immediately)
+            if (this.session.isCompacting) {
+                const submission = await this.prepareClipboardImageSubmission(text);
+                if (this.isExtensionCommand(text)) {
+                    this.editor.addToHistory?.(text);
+                    this.editor.setText("");
+                    await this.session.prompt(submission.text, { images: submission.images });
+                }
+                else {
+                    this.queueCompactionMessage(submission.text, "steer");
+                    if (submission.images) {
+                        this.showWarning("Image attachments cannot be preserved while compaction is running; please resend after compaction finishes.");
+                    }
+                }
+                return;
+            }
+            // If streaming, use prompt() with steer behavior
+            // This handles extension commands (execute immediately), prompt template expansion, and queueing
+            if (this.session.isStreaming) {
+                const submission = await this.prepareClipboardImageSubmission(text);
+                this.editor.addToHistory?.(text);
+                this.editor.setText("");
+                await this.session.prompt(submission.text, { streamingBehavior: "steer", images: submission.images });
+                this.updatePendingMessagesDisplay();
+                this.ui.requestRender();
+                return;
+            }
+            // Normal message submission
+            const submission = await this.prepareClipboardImageSubmission(text);
+            // First, move any pending bash components to chat
+            this.flushPendingBashComponents();
+            if (this.onInputCallback) {
+                this.onInputCallback(submission);
+            }
+            else {
+                this.pendingUserInputs.push(submission);
+            }
+            this.editor.addToHistory?.(text);
+'''
+    if old_submit in text:
+        text = text.replace(old_submit, new_submit, 1)
+    required = [
+        'pendingClipboardImages = [];',
+        'async prepareClipboardImageSubmission(text)',
+        'void this.convertDroppedImagePaths(text)',
+        'this.session.prompt(inputText, inputOptions)',
+    ]
+    missing = [needle for needle in required if needle not in text]
+    if missing:
+        raise SystemExit(f"Could not apply clipboard image attachment patch: missing {missing}")
+    return text
+
+
 def patch_interactive() -> None:
     backup(INTERACTIVE)
     text = INTERACTIVE.read_text()
@@ -660,6 +1053,8 @@ def patch_interactive() -> None:
     )
     if 'sliceByColumn, } from "@earendil-works/pi-tui";' not in text:
         raise SystemExit("Could not patch pi-tui import in interactive-mode.js")
+
+    text = patch_clipboard_image_attachments(text)
 
     # Pi <=0.80 already had our layout class in the patched file; Pi 0.81 no
     # longer has it after upgrades. Replace it when present, otherwise insert it
@@ -696,11 +1091,21 @@ def patch_interactive() -> None:
         "            this.footer,\n"
         "        ]);"
     )
-    if "this.fixedLayout = new FixedBottomScrollLayout(" not in text:
+    status_border_assignment = (
+        "        this.footer.setMainLineVisible?.(false);\n"
+        "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");"
+    )
+    if "this.defaultEditor.setTopBorderProvider?.(" not in text:
         text = text.replace(
             "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);",
             "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
-            + fixed_layout_assignment,
+            + status_border_assignment,
+            1,
+        )
+    if "this.fixedLayout = new FixedBottomScrollLayout(" not in text:
+        text = text.replace(
+            status_border_assignment,
+            status_border_assignment + "\n" + fixed_layout_assignment,
             1,
         )
     # A previous buggy local patch inserted the layout assignment into
@@ -712,6 +1117,14 @@ def patch_interactive() -> None:
         "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
         "        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
     )
+    custom_editor_border_assignment = '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");'
+    if custom_editor_border_assignment not in text:
+        text = text.replace(
+            "        this.editorContainer.addChild(this.editor);\n        this.ui.setFocus(this.editor);",
+            custom_editor_border_assignment + "\n"
+            "        this.editorContainer.addChild(this.editor);\n        this.ui.setFocus(this.editor);",
+            1,
+        )
     old_children = '''        this.ui.addChild(this.headerContainer);
         this.ui.addChild(this.loadedResourcesContainer);
         this.ui.addChild(this.chatContainer);
@@ -739,6 +1152,286 @@ def patch_interactive() -> None:
         )
     INTERACTIVE.write_text(text)
 
+
+def patch_clipboard_image() -> None:
+    backup(CLIPBOARD_IMAGE)
+    text = CLIPBOARD_IMAGE.read_text()
+    text = text.replace(
+        'import { join } from "path";',
+        'import { extname, join } from "path";',
+    )
+    helper = r'''function imageMimeTypeFromPath(filePath) {
+    switch (extname(filePath).toLowerCase()) {
+        case ".png":
+            return "image/png";
+        case ".jpg":
+        case ".jpeg":
+            return "image/jpeg";
+        case ".webp":
+            return "image/webp";
+        case ".gif":
+            return "image/gif";
+        default:
+            return null;
+    }
+}
+function readClipboardImageViaMacOsFileUrl() {
+    const script = [
+        "try",
+        "POSIX path of (the clipboard as «class furl»)",
+        "on error",
+        "\"\"",
+        "end try",
+    ];
+    const result = runCommand("osascript", script.flatMap((line) => ["-e", line]), {
+        timeoutMs: DEFAULT_LIST_TIMEOUT_MS,
+    });
+    if (!result.ok) {
+        return null;
+    }
+    const filePath = result.stdout.toString("utf-8").trim();
+    if (!filePath) {
+        return null;
+    }
+    const mimeType = imageMimeTypeFromPath(filePath);
+    if (!mimeType) {
+        return null;
+    }
+    try {
+        const bytes = readFileSync(filePath);
+        if (bytes.length === 0) {
+            return null;
+        }
+        return { bytes, mimeType };
+    }
+    catch {
+        return null;
+    }
+}
+'''
+    if 'function readClipboardImageViaMacOsFileUrl()' not in text:
+        text = text.replace('function readClipboardImageViaXclip() {', helper + 'function readClipboardImageViaXclip() {', 1)
+    old = '''    else {
+        image = await readClipboardImageViaNativeClipboard();
+    }
+'''
+    new = '''    else if (platform === "darwin") {
+        // Finder puts file icons/previews on the image clipboard when copying an
+        // image file. Prefer the real copied file URL so the model sees the
+        // actual image, not macOS' generic PNG/JPEG document preview icon.
+        image = readClipboardImageViaMacOsFileUrl() ?? (await readClipboardImageViaNativeClipboard());
+    }
+    else {
+        image = await readClipboardImageViaNativeClipboard();
+    }
+'''
+    if old in text:
+        text = text.replace(old, new, 1)
+    required = ['import { extname, join } from "path";', 'function readClipboardImageViaMacOsFileUrl()', 'readClipboardImageViaMacOsFileUrl() ??']
+    missing = [needle for needle in required if needle not in text]
+    if missing:
+        raise SystemExit(f"Could not apply macOS clipboard file image patch: missing {missing}")
+    CLIPBOARD_IMAGE.write_text(text)
+
+
+FOOTER_RENDER_METHOD = r'''    setMainLineVisible(visible) {
+        this.mainLineVisible = visible;
+    }
+    renderMainStatusLine(width) {
+        if (width <= 0) {
+            return "";
+        }
+        const state = this.session.state;
+        // Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+        const usageTotals = createUsageTotals();
+        let latestCacheHitRate;
+        for (const entry of this.session.sessionManager.getEntries()) {
+            if (entry.type === "message" && entry.message.role === "assistant") {
+                addUsageToTotals(usageTotals, entry.message.usage);
+                const latestPromptTokens = entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+                latestCacheHitRate =
+                    latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+            }
+            else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+                addUsageToTotals(usageTotals, entry.message.usage);
+            }
+            else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+                addUsageToTotals(usageTotals, entry.usage);
+            }
+        }
+        // Calculate context usage from session (handles compaction correctly).
+        // After compaction, tokens are unknown until the next LLM response.
+        const contextUsage = this.session.getContextUsage();
+        const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+        const contextPercentValue = contextUsage?.percent ?? 0;
+        const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(contextPercentValue >= 10 ? 0 : 1) : "?";
+        const cwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+        const branch = this.footerData.getGitBranch();
+        const sessionName = this.session.sessionManager.getSessionName();
+        const joinPretty = (parts) => parts.filter(Boolean).join(theme.fg("dim", " · "));
+        const labelled = (label, value, valueColor = "") => `${theme.fg("dim", label)} ${valueColor ? theme.fg(valueColor, value) : value}`;
+        const tokenParts = [];
+        if (usageTotals.input)
+            tokenParts.push(`↑${formatTokens(usageTotals.input)}`);
+        if (usageTotals.output)
+            tokenParts.push(`↓${formatTokens(usageTotals.output)}`);
+        if (usageTotals.cacheRead)
+            tokenParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
+        if (usageTotals.cacheWrite)
+            tokenParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
+        if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+            tokenParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+        }
+        const usingSubscription = state.model
+            ? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingOAuth(state.model.provider)
+            : false;
+        if (usageTotals.cost || usingSubscription) {
+            tokenParts.push(`$${usageTotals.cost.toFixed(3)}${usingSubscription ? " sub" : ""}`);
+        }
+        const autoIndicator = this.autoCompactEnabled ? " auto" : "";
+        const contextPercentDisplay = contextPercent === "?"
+            ? `?/${formatTokens(contextWindow)}${autoIndicator}`
+            : `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+        const contextValue = contextPercentValue > 90
+            ? theme.fg("error", contextPercentDisplay)
+            : contextPercentValue > 70
+                ? theme.fg("warning", contextPercentDisplay)
+                : theme.fg("success", contextPercentDisplay);
+        const rightParts = [];
+        if (branch) {
+            rightParts.push(labelled("git", branch, "warning"));
+        }
+        rightParts.push(`${theme.fg("dim", "ctx")} ${contextValue}`);
+        if (tokenParts.length > 0) {
+            rightParts.push(labelled("tok", tokenParts.join(" ")));
+        }
+        if (areExperimentalFeaturesEnabled()) {
+            rightParts.push(`${theme.fg("dim", "xp")} ${theme.bold(theme.fg("warning", "on"))}`);
+        }
+        const modelName = state.model?.id || "no-model";
+        let modelDisplay = state.model ? `${state.model.provider}/${modelName}` : modelName;
+        if (state.model?.reasoning) {
+            const thinkingLevel = state.thinkingLevel || "off";
+            modelDisplay += thinkingLevel === "off" ? " thinking off" : ` ${thinkingLevel}`;
+        }
+        rightParts.push(labelled("ai", modelDisplay, "accent"));
+        let left = theme.fg("accent", cwd);
+        if (sessionName) {
+            left += `${theme.fg("dim", " • ")}${theme.fg("muted", sessionName)}`;
+        }
+        let right = joinPretty(rightParts);
+        const minGap = 3;
+        const leftWidth = visibleWidth(left);
+        const rightWidth = visibleWidth(right);
+        if (leftWidth + minGap + rightWidth <= width) {
+            const railWidth = Math.max(1, width - leftWidth - rightWidth - 2);
+            return `${left} ${theme.fg("borderMuted", "─".repeat(railWidth))} ${right}`;
+        }
+        const rightLimit = Math.max(0, Math.min(rightWidth, Math.floor(width * 0.58)));
+        right = rightLimit > 0 && rightWidth > rightLimit ? truncateToWidth(right, rightLimit, theme.fg("dim", "…")) : rightLimit > 0 ? right : "";
+        const separatorWidth = right ? 1 : 0;
+        const leftLimit = Math.max(0, width - visibleWidth(right) - separatorWidth);
+        left = leftLimit > 0 ? truncateToWidth(left, leftLimit, theme.fg("dim", "…")) : "";
+        const gap = Math.max(0, width - visibleWidth(left) - visibleWidth(right));
+        return `${left}${" ".repeat(gap)}${right}`;
+    }
+    renderExtensionStatusLines(width) {
+        const extensionStatuses = this.footerData.getExtensionStatuses();
+        if (extensionStatuses.size === 0) {
+            return [];
+        }
+        const sortedStatuses = Array.from(extensionStatuses.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, text]) => sanitizeStatusText(text));
+        const statusLine = `${theme.fg("dim", "dash")} ${sortedStatuses.join(theme.fg("dim", " · "))}`;
+        return [truncateToWidth(statusLine, width, theme.fg("dim", "…"))];
+    }
+    render(width) {
+        const lines = [];
+        if (this.mainLineVisible !== false) {
+            lines.push(this.renderMainStatusLine(width));
+        }
+        lines.push(...this.renderExtensionStatusLines(width));
+        return lines;
+    }
+'''
+
+def replace_js_method(text: str, signature: str, replacement: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for i in range(brace, len(text)):
+        char = text[i]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:start] + replacement + text[i + 1:]
+    raise SystemExit(f"Could not find end of JS method: {signature}")
+
+def patch_footer_component() -> None:
+    backup(FOOTER)
+    text = FOOTER.read_text()
+    if "    mainLineVisible = true;" not in text:
+        text = text.replace("    autoCompactEnabled = true;", "    autoCompactEnabled = true;\n    mainLineVisible = true;", 1)
+    if "    setMainLineVisible(visible) {" in text:
+        start = text.index("    setMainLineVisible(visible) {")
+        end = text.rindex("\n}")
+        text = text[:start] + FOOTER_RENDER_METHOD + text[end:]
+    else:
+        text = replace_js_method(text, "    render(width) {", FOOTER_RENDER_METHOD)
+    required = [
+        'setMainLineVisible(visible)',
+        'renderMainStatusLine(width)',
+        'theme.fg("borderMuted", "─".repeat(railWidth))',
+        'labelled("git", branch, "warning")',
+        'theme.fg("dim", "ctx")',
+        'labelled("tok"',
+        'labelled("ai", modelDisplay, "accent")',
+        'theme.fg("dim", "dash")',
+    ]
+    missing = [needle for needle in required if needle not in text]
+    if missing:
+        raise SystemExit(f"Could not apply footer pretty status patch: missing {missing}")
+    FOOTER.write_text(text)
+
+def patch_custom_editor() -> None:
+    backup(CUSTOM_EDITOR)
+    text = CUSTOM_EDITOR.read_text()
+    if "topBorderProvider;" not in text:
+        text = text.replace(
+            "    onExtensionShortcut;\n",
+            "    onExtensionShortcut;\n"
+            "    topBorderProvider;\n",
+            1,
+        )
+    custom_methods = r'''    setTopBorderProvider(provider) {
+        this.topBorderProvider = provider;
+        this.tui.requestRender();
+    }
+    render(width) {
+        const lines = super.render(width);
+        if (this.topBorderProvider && this.scrollOffset === 0 && lines.length > 0) {
+            const line = this.topBorderProvider(width);
+            if (line) {
+                lines[0] = line;
+            }
+        }
+        return lines;
+    }
+'''
+    if "    setTopBorderProvider(provider) {" in text and "    onAction(action, handler) {" in text:
+        start = text.index("    setTopBorderProvider(provider) {")
+        end = text.index("    onAction(action, handler) {", start)
+        text = text[:start] + custom_methods + text[end:]
+    elif "    onAction(action, handler) {" in text:
+        text = text.replace("    onAction(action, handler) {", custom_methods + "    onAction(action, handler) {", 1)
+    required = ["topBorderProvider;", "setTopBorderProvider(provider)", "const lines = super.render(width)", "this.scrollOffset === 0"]
+    missing = [needle for needle in required if needle not in text]
+    if missing:
+        raise SystemExit(f"Could not apply custom editor top border patch: missing {missing}")
+    CUSTOM_EDITOR.write_text(text)
 
 def patch_terminal() -> None:
     backup(TERMINAL)
@@ -811,12 +1504,15 @@ def install_theme() -> None:
 
 
 def verify() -> None:
-    for path in (INTERACTIVE, TERMINAL):
+    for path in (INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL):
         subprocess.run(["node", "--check", str(path)], check=True)
 
 
 def main() -> None:
     patch_interactive()
+    patch_clipboard_image()
+    patch_footer_component()
+    patch_custom_editor()
     patch_terminal()
     patch_bg_tasks_shortcuts()
     install_theme()
