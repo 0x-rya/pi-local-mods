@@ -497,7 +497,9 @@ TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
         const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
         const visiblePinnedStart = Math.max(0, pinnedLines.length - pinnedRows);
         const localRow = y - (termRows - pinnedRows) + visiblePinnedStart;
-        const hit = this.capturedTerminalLogHitRegions.find((region) => region.row === localRow && x >= region.startCol && x < region.endCol);
+        const hitCandidates = this.capturedTerminalLogHitRegions.filter((region) => region.row === localRow && x >= region.startCol && x < region.endCol);
+        const priority = { copy: 0, close: 1, clear: 1, toggle: 2 };
+        const hit = hitCandidates.sort((a, b) => (priority[a.type] ?? 99) - (priority[b.type] ?? 99))[0];
         if (!hit) {
             return undefined;
         }
@@ -561,6 +563,7 @@ TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
                         const bodyWidth = Math.max(1, width - visibleWidth(bodyPrefix));
                         for (const wrapped of this.wrapCapturedTerminalLogLine(entry.text, bodyWidth)) {
                             lines.push(fit(theme.fg("dim", bodyPrefix) + theme.fg("warning", wrapped)));
+                            this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 0, endCol: width });
                             row++;
                         }
                     }
