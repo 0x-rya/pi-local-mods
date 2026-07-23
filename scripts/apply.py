@@ -32,6 +32,9 @@ TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
 BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
+QUOTA_DASHBOARD_SRC = ROOT / "extensions" / "quota-dashboard.ts"
+QUOTA_DASHBOARD_DST = PI_AGENT_DIR / "extensions" / "quota-dashboard.ts"
+MODELS_STORE = PI_AGENT_DIR / "models-store.json"
 
 FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
     ui;
@@ -1808,6 +1811,29 @@ def install_theme() -> None:
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
+def install_quota_dashboard() -> None:
+    if not QUOTA_DASHBOARD_SRC.exists():
+        raise SystemExit(f"quota-dashboard source missing: {QUOTA_DASHBOARD_SRC}")
+    QUOTA_DASHBOARD_DST.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(QUOTA_DASHBOARD_SRC, QUOTA_DASHBOARD_DST)
+
+
+def strip_google_models() -> None:
+    # models-store.json is periodically refreshed by Pi from a remote catalog,
+    # so Google/Gemini models creep back over time. Re-strip them on every apply
+    # so the model picker only shows providers the user actually authenticates.
+    if not MODELS_STORE.exists():
+        return
+    try:
+        data = json.loads(MODELS_STORE.read_text())
+    except json.JSONDecodeError:
+        return
+    if "google" not in data:
+        return
+    del data["google"]
+    MODELS_STORE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
 def verify() -> None:
     for path in (INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL):
         subprocess.run(["node", "--check", str(path)], check=True)
@@ -1821,6 +1847,8 @@ def main() -> None:
     patch_terminal()
     patch_bg_tasks_shortcuts()
     install_theme()
+    install_quota_dashboard()
+    strip_google_models()
     verify()
     print("Applied pi-local-mods. Restart pi to use the patched runtime.")
 
