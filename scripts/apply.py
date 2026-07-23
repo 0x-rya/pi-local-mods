@@ -1054,9 +1054,13 @@ def patch_interactive() -> None:
     text = INTERACTIVE.read_text()
     text = text.replace(
         'TUI, visibleWidth, } from "@earendil-works/pi-tui";',
-        'TUI, visibleWidth, sliceByColumn, } from "@earendil-works/pi-tui";',
+        'TUI, visibleWidth, sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";',
     )
-    if 'sliceByColumn, } from "@earendil-works/pi-tui";' not in text:
+    text = text.replace(
+        'TUI, visibleWidth, sliceByColumn, } from "@earendil-works/pi-tui";',
+        'TUI, visibleWidth, sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";',
+    )
+    if 'sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";' not in text:
         raise SystemExit("Could not patch pi-tui import in interactive-mode.js")
 
     text = patch_clipboard_image_attachments(text)
@@ -1098,13 +1102,41 @@ def patch_interactive() -> None:
     )
     status_border_assignment = (
         "        this.footer.setMainLineVisible?.(false);\n"
-        "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");"
+        "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");\n"
+        "        this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");"
     )
+    text = text.replace(
+        "setBottomBorderProvider?.((width) => this.footer.renderExtensionStatusLine?.(width) ?? \"\")",
+        "setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\")",
+    )
+    text = text.replace(
+        "setBottomBorderProvider?.((width) => this.footer.renderExtensionStatusBorderLine?.(width) ?? \"\")",
+        "setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\")",
+    )
+    if "    bottomBorderWidgetStatus = \"\";" not in text:
+        text = text.replace(
+            "    widgetContainerAbove;\n    widgetContainerBelow;",
+            "    widgetContainerAbove;\n    widgetContainerBelow;\n    bottomBorderWidgetStatus = \"\";\n    bottomBorderWidgetLimits = \"\";",
+            1,
+        )
+    elif "    bottomBorderWidgetLimits = \"\";" not in text:
+        text = text.replace(
+            "    bottomBorderWidgetStatus = \"\";",
+            "    bottomBorderWidgetStatus = \"\";\n    bottomBorderWidgetLimits = \"\";",
+            1,
+        )
     if "this.defaultEditor.setTopBorderProvider?.(" not in text:
         text = text.replace(
             "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);",
             "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
             + status_border_assignment,
+            1,
+        )
+    elif "this.defaultEditor.setBottomBorderProvider?.(" not in text:
+        text = text.replace(
+            "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");",
+            "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");\n"
+            "        this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");",
             1,
         )
     if "this.fixedLayout = new FixedBottomScrollLayout(" not in text:
@@ -1122,12 +1154,22 @@ def patch_interactive() -> None:
         "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
         "        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
     )
-    custom_editor_border_assignment = '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");'
-    if custom_editor_border_assignment not in text:
+    custom_editor_border_assignment = (
+        '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");\n'
+        '        this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");'
+    )
+    if "this.editor.setTopBorderProvider?.(" not in text:
         text = text.replace(
             "        this.editorContainer.addChild(this.editor);\n        this.ui.setFocus(this.editor);",
             custom_editor_border_assignment + "\n"
             "        this.editorContainer.addChild(this.editor);\n        this.ui.setFocus(this.editor);",
+            1,
+        )
+    elif "this.editor.setBottomBorderProvider?.(" not in text:
+        text = text.replace(
+            '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");',
+            '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");\n'
+            '        this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
             1,
         )
     old_children = '''        this.ui.addChild(this.headerContainer);
@@ -1155,6 +1197,192 @@ def patch_interactive() -> None:
             "        this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));",
             1,
         )
+    bottom_status_methods = r'''    stripStatusAnsi(text) {
+        return text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
+    }
+    compactLeanCtxStatus(text) {
+        const plain = this.stripStatusAnsi(text);
+        const state = plain.match(/lean-ctx\s+(\S+)/)?.[1];
+        const saved = plain.match(/saved\s+([^\s]+)/)?.[1];
+        const pct = plain.match(/tok\s+([^\s]+)/)?.[1];
+        const cost = plain.match(/(\$[^\s]+)/)?.[1];
+        const parts = [
+            `${theme.fg("dim", "ctx")} ${state === "on" ? theme.fg("success", "on") : theme.fg("warning", state ?? "?")}`,
+        ];
+        if (saved) parts.push(theme.fg("accent", saved));
+        if (pct) parts.push(theme.fg("success", pct));
+        if (cost) parts.push(theme.fg("warning", cost.replace(/\.00$/, "")));
+        return parts.join(theme.fg("dim", " · "));
+    }
+    shortLimitName(name) {
+        if (/spark/i.test(name)) return "Spark";
+        if (/codex/i.test(name)) return "Codex";
+        if (/zai/i.test(name)) return "Zai";
+        if (/gemini/i.test(name)) return "Gemini";
+        return name.trim().split(/[\s/-]+/).filter(Boolean).pop() ?? name.trim();
+    }
+    compactLimitsStatus(text) {
+        const plain = this.stripStatusAnsi(text).replace(/^\s*Limits\s*[|│]\s*/, "");
+        const parts = [];
+        const pushPart = (name, pct) => {
+            if (!name || pct === undefined) return;
+            const color = pct >= 80 ? "success" : pct >= 50 ? "warning" : "error";
+            parts.push(`${theme.fg("dim", this.shortLimitName(name))} ${theme.fg(color, `${pct}%`)}`);
+        };
+        for (const chunk of plain.split(/\s+[|│]\s+/)) {
+            const spark = chunk.match(/(GPT[^:]*Spark):\s*(\d+)%\s+left/i);
+            if (spark) pushPart(spark[1], Number(spark[2]));
+            const providerChunk = chunk.replace(/\s*·\s*GPT[^:]*Spark:\s*\d+%\s+left/i, "");
+            const name = providerChunk.split(/\s+(?:5h|wk):/)[0]?.trim();
+            const pctMatch = providerChunk.match(/wk:\s*(\d+)%\s+left/i) ?? providerChunk.match(/5h:\s*(\d+)%\s+left/i);
+            pushPart(name, pctMatch ? Number(pctMatch[1]) : undefined);
+        }
+        return parts.length ? `${theme.fg("dim", "lim")} ${parts.join(theme.fg("dim", " · "))}` : "";
+    }
+    refreshBottomBorderWidgetStatus(width) {
+        this.bottomBorderWidgetStatus = "";
+        this.bottomBorderWidgetLimits = "";
+        for (const component of this.extensionWidgetsBelow.values()) {
+            this.moveBottomWidgetStatusToEditorBorder(component.render(width));
+        }
+    }
+    renderBottomBorderWidgetStatusLine(width) {
+        if (width <= 0) {
+            return "";
+        }
+        this.refreshBottomBorderWidgetStatus(width);
+        let left = this.bottomBorderWidgetStatus || "";
+        let right = this.bottomBorderWidgetLimits || "";
+        if (!left && !right) {
+            return "";
+        }
+        const minGap = left && right ? 3 : 1;
+        if (left && right && visibleWidth(left) + visibleWidth(right) + minGap > width) {
+            const rightLimit = Math.max(0, Math.min(visibleWidth(right), Math.floor(width * 0.45)));
+            right = rightLimit > 0 ? truncateToWidth(right, rightLimit, theme.fg("dim", "…")) : "";
+            const leftLimit = Math.max(0, width - visibleWidth(right) - minGap);
+            left = leftLimit > 0 ? truncateToWidth(left, leftLimit, theme.fg("dim", "…")) : "";
+        }
+        const used = visibleWidth(left) + visibleWidth(right);
+        const rail = theme.fg("borderMuted", "─".repeat(Math.max(0, width - used - (left && right ? 2 : left || right ? 1 : 0))));
+        if (left && right) return `${left} ${rail} ${right}`;
+        if (left) return `${left} ${rail}`;
+        return `${rail} ${right}`;
+    }
+    moveBottomWidgetStatusToEditorBorder(lines) {
+        const kept = [];
+        for (const line of lines) {
+            const plain = this.stripStatusAnsi(line);
+            const leanCtxIndex = plain.indexOf("lean-ctx");
+            if (leanCtxIndex !== -1) {
+                this.bottomBorderWidgetStatus = this.compactLeanCtxStatus(plain.slice(leanCtxIndex).trim());
+                continue;
+            }
+            const trimmedPlain = plain.trimStart();
+            if (/^Limits\s*[|│]/.test(trimmedPlain)) {
+                this.bottomBorderWidgetLimits = this.compactLimitsStatus(trimmedPlain);
+                continue;
+            }
+            kept.push(line);
+        }
+        return kept;
+    }
+'''
+    if "    renderBottomBorderWidgetStatusLine(width) {" in text:
+        start = text.index("    renderBottomBorderWidgetStatusLine(width) {")
+        end = text.index("    renderWidgets() {", start)
+        text = text[:start] + bottom_status_methods + text[end:]
+    else:
+        text = text.replace("    renderWidgets() {", bottom_status_methods + "    renderWidgets() {", 1)
+    old_render_widget_container = r'''    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+        container.clear();
+        if (widgets.size === 0) {
+            if (spacerWhenEmpty) {
+                container.addChild(new Spacer(1));
+            }
+            return;
+        }
+        if (leadingSpacer) {
+            container.addChild(new Spacer(1));
+        }
+        for (const component of widgets.values()) {
+            container.addChild(component);
+        }
+    }
+'''
+    previous_render_widget_container = r'''    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+        container.clear();
+        if (!leadingSpacer) {
+            this.bottomBorderWidgetStatus = "";
+            this.bottomBorderWidgetLimits = "";
+        }
+        if (widgets.size === 0) {
+            if (spacerWhenEmpty) {
+                container.addChild(new Spacer(1));
+            }
+            return;
+        }
+        if (leadingSpacer) {
+            container.addChild(new Spacer(1));
+            for (const component of widgets.values()) {
+                container.addChild(component);
+            }
+            return;
+        }
+        const width = this.ui.terminal?.columns ?? 80;
+        for (const component of widgets.values()) {
+            const lines = this.moveBottomWidgetStatusToEditorBorder(component.render(width));
+            for (const line of lines) {
+                container.addChild(new Text(line, 1, 0));
+            }
+        }
+    }
+'''
+    new_render_widget_container = r'''    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+        container.clear();
+        if (!leadingSpacer) {
+            this.bottomBorderWidgetStatus = "";
+            this.bottomBorderWidgetLimits = "";
+        }
+        if (widgets.size === 0) {
+            if (spacerWhenEmpty) {
+                container.addChild(new Spacer(1));
+            }
+            return;
+        }
+        if (leadingSpacer) {
+            container.addChild(new Spacer(1));
+            for (const component of widgets.values()) {
+                container.addChild(component);
+            }
+            return;
+        }
+        for (const component of widgets.values()) {
+            container.addChild({
+                render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width)),
+                invalidate: () => component.invalidate?.(),
+                dispose: () => component.dispose?.(),
+            });
+        }
+    }
+'''
+    if "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {" in text:
+        text = replace_js_method(text, "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {", new_render_widget_container)
+    required_interactive = [
+        'bottomBorderWidgetStatus = "";',
+        'bottomBorderWidgetLimits = "";',
+        'compactLeanCtxStatus(text)',
+        'compactLimitsStatus(text)',
+        'refreshBottomBorderWidgetStatus(width)',
+        'renderBottomBorderWidgetStatusLine(width)',
+        'moveBottomWidgetStatusToEditorBorder(lines)',
+        'render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width))',
+        'this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
+        'this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
+    ]
+    missing_interactive = [needle for needle in required_interactive if needle not in text]
+    if missing_interactive:
+        raise SystemExit(f"Could not apply bottom border widget status patch: missing {missing_interactive}")
     INTERACTIVE.write_text(text)
 
 
@@ -1340,23 +1568,38 @@ FOOTER_RENDER_METHOD = r'''    setMainLineVisible(visible) {
         const gap = Math.max(0, width - visibleWidth(left) - visibleWidth(right));
         return `${left}${" ".repeat(gap)}${right}`;
     }
-    renderExtensionStatusLines(width) {
+    renderExtensionStatusLine(width) {
         const extensionStatuses = this.footerData.getExtensionStatuses();
         if (extensionStatuses.size === 0) {
-            return [];
+            return "";
         }
         const sortedStatuses = Array.from(extensionStatuses.entries())
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, text]) => sanitizeStatusText(text));
         const statusLine = `${theme.fg("dim", "dash")} ${sortedStatuses.join(theme.fg("dim", " · "))}`;
-        return [truncateToWidth(statusLine, width, theme.fg("dim", "…"))];
+        return truncateToWidth(statusLine, width, theme.fg("dim", "…"));
+    }
+    renderExtensionStatusBorderLine(width) {
+        const statusLine = this.renderExtensionStatusLine(width);
+        if (!statusLine) {
+            return "";
+        }
+        const statusWidth = visibleWidth(statusLine);
+        if (statusWidth >= width) {
+            return truncateToWidth(statusLine, width, theme.fg("dim", "…"));
+        }
+        return `${statusLine} ${theme.fg("borderMuted", "─".repeat(Math.max(0, width - statusWidth - 1)))}`;
+    }
+    renderExtensionStatusLines(width) {
+        const statusLine = this.renderExtensionStatusLine(width);
+        return statusLine ? [statusLine] : [];
     }
     render(width) {
         const lines = [];
         if (this.mainLineVisible !== false) {
             lines.push(this.renderMainStatusLine(width));
+            lines.push(...this.renderExtensionStatusLines(width));
         }
-        lines.push(...this.renderExtensionStatusLines(width));
         return lines;
     }
 '''
@@ -1389,6 +1632,8 @@ def patch_footer_component() -> None:
     required = [
         'setMainLineVisible(visible)',
         'renderMainStatusLine(width)',
+        'renderExtensionStatusLine(width)',
+        'renderExtensionStatusBorderLine(width)',
         'theme.fg("borderMuted", "─".repeat(railWidth))',
         'labelled("git", branch, "warning")',
         'theme.fg("dim", "ctx")',
@@ -1408,22 +1653,63 @@ def patch_custom_editor() -> None:
         text = text.replace(
             "    onExtensionShortcut;\n",
             "    onExtensionShortcut;\n"
-            "    topBorderProvider;\n",
+            "    topBorderProvider;\n"
+            "    bottomBorderProvider;\n",
             1,
         )
+    elif "bottomBorderProvider;" not in text:
+        text = text.replace("    topBorderProvider;\n", "    topBorderProvider;\n    bottomBorderProvider;\n", 1)
     custom_methods = r'''    setTopBorderProvider(provider) {
         this.topBorderProvider = provider;
         this.tui.requestRender();
     }
+    setBottomBorderProvider(provider) {
+        this.bottomBorderProvider = provider;
+        this.tui.requestRender();
+    }
+    frameLine(line, width, left, right) {
+        if (width <= 1) {
+            return this.borderColor(left);
+        }
+        const sidePadding = width >= 4 ? 1 : 0;
+        const innerWidth = Math.max(0, width - 2 - sidePadding * 2);
+        const borderColoredLine = line.replace(/─/g, this.borderColor("─"));
+        const fitted = visibleWidth(borderColoredLine) > innerWidth
+            ? truncateToWidth(borderColoredLine, innerWidth, "")
+            : `${borderColoredLine}${" ".repeat(Math.max(0, innerWidth - visibleWidth(borderColoredLine)))}`;
+        const pad = " ".repeat(sidePadding);
+        return `${this.borderColor(left)}${pad}${fitted}${pad}${this.borderColor(right)}`;
+    }
     render(width) {
         const lines = super.render(width);
-        if (this.topBorderProvider && this.scrollOffset === 0 && lines.length > 0) {
-            const line = this.topBorderProvider(width);
+        if (lines.length === 0) {
+            return lines;
+        }
+        const innerWidth = Math.max(0, width - 2);
+        if (this.topBorderProvider && this.scrollOffset === 0) {
+            const line = this.topBorderProvider(innerWidth);
             if (line) {
                 lines[0] = line;
             }
         }
-        return lines;
+        const terminalRows = this.tui.terminal.rows;
+        const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+        const layoutLines = this.layoutText(this.lastWidth);
+        const visibleLineCount = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines).length;
+        const bottomBorderIndex = Math.min(lines.length - 1, 1 + visibleLineCount);
+        if (this.bottomBorderProvider && bottomBorderIndex >= 0 && bottomBorderIndex < lines.length) {
+            const line = this.bottomBorderProvider(innerWidth, lines[bottomBorderIndex]);
+            if (line) {
+                lines[bottomBorderIndex] = line;
+            }
+        }
+        const framed = [];
+        for (let i = 0; i <= bottomBorderIndex; i++) {
+            if (i === 0) framed.push(this.frameLine(lines[i] ?? "", width, "╭", "╮"));
+            else if (i === bottomBorderIndex) framed.push(this.frameLine(lines[i] ?? "", width, "╰", "╯"));
+            else framed.push(this.frameLine(lines[i] ?? "", width, "│", "│"));
+        }
+        return [...framed, ...lines.slice(bottomBorderIndex + 1)];
     }
 '''
     if "    setTopBorderProvider(provider) {" in text and "    onAction(action, handler) {" in text:
@@ -1432,10 +1718,16 @@ def patch_custom_editor() -> None:
         text = text[:start] + custom_methods + text[end:]
     elif "    onAction(action, handler) {" in text:
         text = text.replace("    onAction(action, handler) {", custom_methods + "    onAction(action, handler) {", 1)
-    required = ["topBorderProvider;", "setTopBorderProvider(provider)", "const lines = super.render(width)", "this.scrollOffset === 0"]
+    if 'import { Editor } from "@earendil-works/pi-tui";' in text:
+        text = text.replace(
+            'import { Editor } from "@earendil-works/pi-tui";',
+            'import { Editor, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";',
+            1,
+        )
+    required = ["topBorderProvider;", "bottomBorderProvider;", "setTopBorderProvider(provider)", "setBottomBorderProvider(provider)", "frameLine(line, width, left, right)", "const lines = super.render(width)", "this.scrollOffset === 0", "bottomBorderIndex", "truncateToWidth"]
     missing = [needle for needle in required if needle not in text]
     if missing:
-        raise SystemExit(f"Could not apply custom editor top border patch: missing {missing}")
+        raise SystemExit(f"Could not apply custom editor border patch: missing {missing}")
     CUSTOM_EDITOR.write_text(text)
 
 def patch_terminal() -> None:
