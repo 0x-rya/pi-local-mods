@@ -15,6 +15,26 @@ These are intentionally **not** implemented as a Pi extension because the useful
 ./apply.sh
 ```
 
+`apply.sh` checks for `python3` and `node`. It also checks for `npm` when using the global npm Pi install path. If the global `@earendil-works/pi-coding-agent` package is missing, it installs it, then applies the local patches. If `PI_CODING_AGENT_DIR` is set, that directory is used instead of installing/patching the global npm package.
+
+To explicitly update Pi before patching:
+
+```bash
+./apply.sh --upgrade-pi
+```
+
+To install a specific Pi version during bootstrap/upgrade:
+
+```bash
+PI_VERSION=0.81.1 ./apply.sh --upgrade-pi
+```
+
+To patch only without bootstrapping packages:
+
+```bash
+./apply.sh --no-bootstrap
+```
+
 Restart Pi after applying.
 
 ## Test
