@@ -1032,11 +1032,16 @@ def patch_clipboard_image_attachments(text: str) -> str:
 '''
     if old_submit in text:
         text = text.replace(old_submit, new_submit, 1)
+    text = text.replace(
+        'const submission = this.prepareClipboardImageSubmission(text);',
+        'const submission = await this.prepareClipboardImageSubmission(text);',
+    )
     required = [
         'pendingClipboardImages = [];',
         'async prepareClipboardImageSubmission(text)',
         'void this.convertDroppedImagePaths(text)',
         'this.session.prompt(inputText, inputOptions)',
+        'const submission = await this.prepareClipboardImageSubmission(text);',
     ]
     missing = [needle for needle in required if needle not in text]
     if missing:

@@ -64,6 +64,31 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("capturedTerminalLogHitRegions.push({ type: \"copy\"", text)
         self.assertIn("const priority = { copy: 0, close: 1, clear: 1, toggle: 2 };", text)
         self.assertIn("capturedTerminalLogHitRegions.push({ type: \"toggle\", id: entry.id, row, startCol: 0", text)
+        self.assertIn("const submission = await this.prepareClipboardImageSubmission(text);", text)
+        self.assertNotIn("const submission = this.prepareClipboardImageSubmission(text);", text)
+
+    def test_interactive_patch_repairs_legacy_unawaited_clipboard_submission(self) -> None:
+        source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
+        interactive = self.copy_fixture(
+            source,
+            "pi/dist/modes/interactive/interactive-mode.js",
+        )
+        self.mod.INTERACTIVE = interactive
+
+        self.mod.patch_interactive()
+        patched_text = interactive.read_text()
+        awaited_call = "const submission = await this.prepareClipboardImageSubmission(text);"
+        unawaited_call = "const submission = this.prepareClipboardImageSubmission(text);"
+        self.assertIn(awaited_call, patched_text)
+
+        broken_text = patched_text.replace(awaited_call, unawaited_call)
+        self.assertIn(unawaited_call, broken_text)
+        interactive.write_text(broken_text)
+
+        self.mod.patch_interactive()
+        repaired_text = interactive.read_text()
+        self.assertNotIn(unawaited_call, repaired_text)
+        self.assertEqual(repaired_text.count(awaited_call), patched_text.count(awaited_call))
 
     def test_terminal_patch_final_result(self) -> None:
         source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
