@@ -1224,18 +1224,25 @@ def patch_interactive() -> None:
     compactLimitsStatus(text) {
         const plain = this.stripStatusAnsi(text).replace(/^\s*Limits\s*[|│]\s*/, "");
         const parts = [];
-        const pushPart = (name, pct) => {
-            if (!name || pct === undefined) return;
-            const color = pct >= 80 ? "success" : pct >= 50 ? "warning" : "error";
-            parts.push(`${theme.fg("dim", this.shortLimitName(name))} ${theme.fg(color, `${pct}%`)}`);
+        const colorFor = (pct) => pct === undefined ? "dim" : pct >= 80 ? "success" : pct >= 50 ? "warning" : "error";
+        const fmt = (pct) => theme.fg(colorFor(pct), pct === undefined ? "—" : `${pct}`);
+        const compactReset = (str) => str ? str.replace(/\s+/g, "") : "—";
+        const pushPart = (name, fiveHour, weekly, fiveHourReset, weeklyReset) => {
+            if (!name) return;
+            let part = `${theme.fg("dim", this.shortLimitName(name))} ${fmt(fiveHour)}${theme.fg("dim", "/")}${fmt(weekly)}`;
+            if (fiveHourReset || weeklyReset) {
+                part += ` ${theme.fg("dim", `in ${compactReset(fiveHourReset)}/${compactReset(weeklyReset)}`)}`;
+            }
+            parts.push(part);
         };
         for (const chunk of plain.split(/\s+[|│]\s+/)) {
-            const spark = chunk.match(/(GPT[^:]*Spark):\s*(\d+)%\s+left/i);
-            if (spark) pushPart(spark[1], Number(spark[2]));
             const providerChunk = chunk.replace(/\s*·\s*GPT[^:]*Spark:\s*\d+%\s+left/i, "");
             const name = providerChunk.split(/\s+(?:5h|wk):/)[0]?.trim();
-            const pctMatch = providerChunk.match(/wk:\s*(\d+)%\s+left/i) ?? providerChunk.match(/5h:\s*(\d+)%\s+left/i);
-            pushPart(name, pctMatch ? Number(pctMatch[1]) : undefined);
+            const fiveHour = providerChunk.match(/5h:\s*(\d+)%\s+left/i)?.[1];
+            const weekly = providerChunk.match(/wk:\s*(\d+)%\s+left/i)?.[1];
+            const fiveHourReset = providerChunk.match(/5h:\s*\d+%\s+left\s+\(in\s+([^)]+)\)/i)?.[1];
+            const weeklyReset = providerChunk.match(/wk:\s*\d+%\s+left\s+\(in\s+([^)]+)\)/i)?.[1];
+            pushPart(name, fiveHour ? Number(fiveHour) : undefined, weekly ? Number(weekly) : undefined, fiveHourReset, weeklyReset);
         }
         return parts.length ? `${theme.fg("dim", "lim")} ${parts.join(theme.fg("dim", " · "))}` : "";
     }
@@ -1685,9 +1692,10 @@ def patch_custom_editor() -> None:
         if (lines.length === 0) {
             return lines;
         }
-        const innerWidth = Math.max(0, width - 2);
+        const sidePadding = width >= 4 ? 1 : 0;
+        const contentWidth = Math.max(0, width - 2 - sidePadding * 2);
         if (this.topBorderProvider && this.scrollOffset === 0) {
-            const line = this.topBorderProvider(innerWidth);
+            const line = this.topBorderProvider(contentWidth);
             if (line) {
                 lines[0] = line;
             }
@@ -1698,7 +1706,7 @@ def patch_custom_editor() -> None:
         const visibleLineCount = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines).length;
         const bottomBorderIndex = Math.min(lines.length - 1, 1 + visibleLineCount);
         if (this.bottomBorderProvider && bottomBorderIndex >= 0 && bottomBorderIndex < lines.length) {
-            const line = this.bottomBorderProvider(innerWidth, lines[bottomBorderIndex]);
+            const line = this.bottomBorderProvider(contentWidth, lines[bottomBorderIndex]);
             if (line) {
                 lines[bottomBorderIndex] = line;
             }
