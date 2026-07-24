@@ -201,6 +201,28 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("readClipboardImageViaMacOsFileUrl() ??", text)
         self.assertNodeChecks(clip)
 
+    def test_install_hook_idempotent(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_hook", ROOT / "scripts" / "install_hook.py")
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        rc = self.root / ".zshrc"
+        hook = self.root / "pi-hook.sh"  # temp stand-in; must not touch the real file
+        hook.write_text("# hook\n")
+
+        self.assertEqual(mod.install(rc, hook), "installed")
+        text = rc.read_text()
+        self.assertIn("pi-hook.sh", text)
+        self.assertIn(str(hook), text)
+        self.assertTrue((self.root / ".zshrc.pi-local-mods.bak").exists())
+
+        # Second call is a no-op (idempotent) and must not duplicate the block.
+        before = rc.read_text()
+        self.assertEqual(mod.install(rc, hook), "present")
+        self.assertEqual(rc.read_text(), before)
+        self.assertEqual(text.count("pi-hook.sh"), rc.read_text().count("pi-hook.sh"))
+
     def test_bg_tasks_shortcut_patch_final_result(self) -> None:
         package = self.root / "agent/npm/node_modules/pi-patty-bg-tasks"
         shortcuts_source = AGENT_FIXTURE / "npm/node_modules/pi-patty-bg-tasks/src/shortcuts.ts"

@@ -95,3 +95,7 @@ if [[ "$bootstrap" == true ]]; then
 fi
 
 python3 "$ROOT/scripts/apply.py"
+
+# Ensure the native `pi update` auto re-apply hook is sourced from ~/.zshrc
+# (idempotent; backs up to ~/.zshrc.pi-local-mods.bak).
+python3 "$ROOT/scripts/install_hook.py" "$HOME/.zshrc" "$ROOT/scripts/pi-hook.sh"

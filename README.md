@@ -53,17 +53,13 @@ Patches are exact-string transforms, so a Pi release can shift a target and brea
 
 ### Auto re-apply after `pi update` (recommended)
 
-Source the hook from your shell profile so every successful `pi update` automatically re-applies the patches and runs the drift smoke test + patch suite:
+`apply.sh` automatically installs a `pi update` hook into `~/.zshrc` (backing it up to `~/.zshrc.pi-local-mods.bak` the first time). It's idempotent, so re-running `apply.sh` won't duplicate the block.
 
-```bash
-# ~/.zshrc (or ~/.bashrc)
-[ -f "$HOME/home/pi-local-mods/scripts/pi-hook.sh" ] && \
-    source "$HOME/home/pi-local-mods/scripts/pi-hook.sh"
-```
+Once sourced, every successful `pi update` automatically re-applies the patches and runs the drift smoke test + patch suite: update Pi → re-apply patches → smoke-test → run the suite. If a patch drifted on the new Pi, `apply.py` aborts and the hook reports it.
 
-Now `pi update` does: update Pi → re-apply patches → smoke-test → run the suite. If a patch drifted on the new Pi, `apply.py` aborts and the hook reports it.
+The hook lives in your shell profile, not in Pi's files, so it survives every update — unlike patching Pi's own update routine, which `pi update` would wipe (chicken-and-egg). It overrides `pi` as a shell function and calls the real binary via `command pi`, so it only acts on a successful `update`.
 
-The hook lives in your shell profile, not in Pi's files, so it survives every update — unlike patching Pi's own update routine, which `pi update` would wipe (chicken-and-egg).
+> Using bash instead of zsh? Run `python3 scripts/install_hook.py ~/.bashrc` (the default targets `~/.zshrc`).
 
 ### Manual drift checks (anytime)
 
