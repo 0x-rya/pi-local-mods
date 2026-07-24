@@ -39,10 +39,29 @@ Restart Pi after applying.
 
 ## Test
 
-The test suite applies patches to committed fixtures, not to the live Pi install:
+The suite applies every patch to committed fixtures (snapshots of clean Pi source) and `node --check`s the result, so it catches both applicability and JS-syntax regressions without touching the live install:
 
 ```bash
-python3 -m unittest scripts/test_apply.py
+python3 -m unittest scripts.test_apply
+```
+
+CI (`.github/workflows/test.yml`) runs this on every push/PR.
+
+## Keeping up with Pi updates
+
+Patches are exact-string transforms, so a Pi release can shift a target and break a patch. The tooling makes drift loud, not silent:
+
+- **`apply.sh --upgrade-pi`** reinstalls Pi, applies patches, then *automatically* runs the drift smoke test and the patch suite. If a patch no longer fits the new Pi, `apply.py` aborts with the missing needle and smoke reports drift.
+- **`scripts/smoke.py`** — non-mutating drift check: patches a throwaway copy of the *currently installed* clean Pi and `node --check`s it. Run anytime: `python3 scripts/smoke.py`.
+- **`tests/fixtures/VERSION`** pins the Pi version the fixtures came from. `apply.py` prints a warning when the installed Pi differs (e.g. `fixtures pinned to Pi 0.81.1 but installed Pi is 0.82.0`).
+- **`scripts/refresh_fixtures.py`** — after confirming patches work on a new Pi, refresh the frozen snapshots and bump `VERSION`: `python3 scripts/refresh_fixtures.py`.
+
+Typical upgrade flow:
+
+```bash
+./apply.sh --upgrade-pi               # upgrade + patch + auto drift/test
+python3 scripts/refresh_fixtures.py   # if green, snapshot new fixtures
+git commit -am "Refresh fixtures for Pi <version>"
 ```
 
 ## Selection UX

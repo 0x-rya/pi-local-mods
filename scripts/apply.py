@@ -791,6 +791,66 @@ def backup(path: Path) -> None:
         shutil.copy2(path, bak)
 
 
+# Markers that only appear in *patched* files, used to locate clean source.
+CLEAN_MARKERS = {
+    "INTERACTIVE": "class FixedBottomScrollLayout",
+    "CLIPBOARD_IMAGE": "readClipboardImageViaMacOsFileUrl",
+    "FOOTER": "renderMainStatusLine",
+    "CUSTOM_EDITOR": "setTopBorderProvider",
+    "TERMINAL": "Enable button-event mouse tracking",
+}
+
+
+def installed_pi_version() -> str | None:
+    pkg = PI_PACKAGE / "package.json"
+    if not pkg.exists():
+        return None
+    try:
+        return json.loads(pkg.read_text()).get("version")
+    except Exception:
+        return None
+
+
+def clean_source(path: Path, patched_marker: str) -> Path:
+    """Return a path whose contents are the unpatched (clean) version of `path`.
+
+    Prefers the live file when it is already clean; otherwise falls back to the
+    `.pi-local-mods.bak` snapshot captured on first apply. Raises if neither is
+    clean (e.g. Pi drifted and no clean snapshot exists).
+    """
+    if path.exists() and patched_marker not in path.read_text():
+        return path
+    bak = path.with_suffix(path.suffix + ".pi-local-mods.bak")
+    if bak.exists() and patched_marker not in bak.read_text():
+        return bak
+    raise SystemExit(
+        f"No clean source for {path} (marker {patched_marker!r} present in both "
+        "live and backup). Reinstall Pi clean first: "
+        "npm install -g @earendil-works/pi-coding-agent"
+    )
+
+
+FIXTURE_VERSION_FILE = ROOT / "tests" / "fixtures" / "VERSION"
+
+
+def check_fixture_version() -> None:
+    """Warn (non-fatal) if the frozen fixtures are pinned to a different Pi
+    version than the one currently installed."""
+    installed = installed_pi_version()
+    if not installed:
+        return
+    if not FIXTURE_VERSION_FILE.exists():
+        print(f"note: no tests/fixtures/VERSION; installed Pi is {installed}.")
+        return
+    pinned = FIXTURE_VERSION_FILE.read_text().strip()
+    if pinned != installed:
+        print(
+            f"WARNING: fixtures are pinned to Pi {pinned} but installed Pi is "
+            f"{installed}. Patches may have drifted — run: "
+            "python3 scripts/refresh_fixtures.py"
+        )
+
+
 def patch_clipboard_image_attachments(text: str) -> str:
     if 'import { processImage } from "../../utils/image-process.js";' not in text:
         text = text.replace(
@@ -2025,6 +2085,7 @@ def verify() -> None:
 
 
 def main() -> None:
+    check_fixture_version()
     patch_interactive()
     patch_clipboard_image()
     patch_footer_component()

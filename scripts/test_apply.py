@@ -153,6 +153,54 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("Enable button-event mouse tracking with SGR encoding", text)
         self.assertNodeChecks(terminal)
 
+    def test_footer_patch_final_result(self) -> None:
+        source = PI_FIXTURE / "dist/modes/interactive/components/footer.js"
+        self.assertNotIn("renderMainStatusLine", source.read_text())
+        footer = self.copy_fixture(source, "pi/dist/modes/interactive/components/footer.js")
+        self.mod.FOOTER = footer
+
+        self.mod.patch_footer_component()
+        text = footer.read_text()
+
+        self.assertIn("mainLineVisible = true;", text)
+        self.assertIn("setMainLineVisible(visible)", text)
+        self.assertIn("renderMainStatusLine(width)", text)
+        self.assertIn('labelled("git", branch, "warning")', text)
+        self.assertIn('labelled("ai", modelDisplay, "accent")', text)
+        self.assertIn("if (this.mainLineVisible !== false)", text)
+        self.assertNodeChecks(footer)
+
+    def test_custom_editor_patch_final_result(self) -> None:
+        source = PI_FIXTURE / "dist/modes/interactive/components/custom-editor.js"
+        self.assertNotIn("setTopBorderProvider", source.read_text())
+        editor = self.copy_fixture(source, "pi/dist/modes/interactive/components/custom-editor.js")
+        self.mod.CUSTOM_EDITOR = editor
+
+        self.mod.patch_custom_editor()
+        text = editor.read_text()
+
+        self.assertIn("topBorderProvider;", text)
+        self.assertIn("bottomBorderProvider;", text)
+        self.assertIn("setTopBorderProvider(provider)", text)
+        self.assertIn("setBottomBorderProvider(provider)", text)
+        self.assertIn("frameLine(line, width, left, right)", text)
+        self.assertIn("const lines = super.render(width)", text)
+        self.assertNodeChecks(editor)
+
+    def test_clipboard_image_patch_final_result(self) -> None:
+        source = PI_FIXTURE / "dist/utils/clipboard-image.js"
+        self.assertNotIn("readClipboardImageViaMacOsFileUrl", source.read_text())
+        clip = self.copy_fixture(source, "pi/dist/utils/clipboard-image.js")
+        self.mod.CLIPBOARD_IMAGE = clip
+
+        self.mod.patch_clipboard_image()
+        text = clip.read_text()
+
+        self.assertIn('import { extname, join } from "path";', text)
+        self.assertIn("function readClipboardImageViaMacOsFileUrl()", text)
+        self.assertIn("readClipboardImageViaMacOsFileUrl() ??", text)
+        self.assertNodeChecks(clip)
+
     def test_bg_tasks_shortcut_patch_final_result(self) -> None:
         package = self.root / "agent/npm/node_modules/pi-patty-bg-tasks"
         shortcuts_source = AGENT_FIXTURE / "npm/node_modules/pi-patty-bg-tasks/src/shortcuts.ts"
