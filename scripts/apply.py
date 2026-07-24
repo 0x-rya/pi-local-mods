@@ -783,11 +783,16 @@ def patch_terminal_log_guard(text: str) -> str:
     return text
 
 
-def backup(path: Path) -> None:
+def backup(path: Path, patched_marker: str = "") -> None:
     if not path.exists():
         raise SystemExit(f"Missing expected file: {path}")
     bak = path.with_suffix(path.suffix + ".pi-local-mods.bak")
-    if not bak.exists():
+    live_is_clean = not patched_marker or patched_marker not in path.read_text()
+    # Refresh the clean snapshot whenever the live file is unpatched (e.g. right
+    # after `pi update` reinstalled it), so the .bak always reflects the current
+    # Pi version. When the live file is already patched (a re-apply), keep the
+    # existing clean snapshot instead of overwriting it with patched content.
+    if live_is_clean or not bak.exists():
         shutil.copy2(path, bak)
 
 
@@ -1247,7 +1252,7 @@ def patch_clipboard_image_attachments(text: str) -> str:
 
 
 def patch_interactive() -> None:
-    backup(INTERACTIVE)
+    backup(INTERACTIVE, CLEAN_MARKERS["INTERACTIVE"])
     text = INTERACTIVE.read_text()
     text = text.replace(
         'TUI, visibleWidth, } from "@earendil-works/pi-tui";',
@@ -1658,7 +1663,7 @@ def patch_interactive() -> None:
 
 
 def patch_clipboard_image() -> None:
-    backup(CLIPBOARD_IMAGE)
+    backup(CLIPBOARD_IMAGE, CLEAN_MARKERS["CLIPBOARD_IMAGE"])
     text = CLIPBOARD_IMAGE.read_text()
     text = text.replace(
         'import { join } from "path";',
@@ -1890,7 +1895,7 @@ def replace_js_method(text: str, signature: str, replacement: str) -> str:
     raise SystemExit(f"Could not find end of JS method: {signature}")
 
 def patch_footer_component() -> None:
-    backup(FOOTER)
+    backup(FOOTER, CLEAN_MARKERS["FOOTER"])
     text = FOOTER.read_text()
     if "    mainLineVisible = true;" not in text:
         text = text.replace("    autoCompactEnabled = true;", "    autoCompactEnabled = true;\n    mainLineVisible = true;", 1)
@@ -1918,7 +1923,7 @@ def patch_footer_component() -> None:
     FOOTER.write_text(text)
 
 def patch_custom_editor() -> None:
-    backup(CUSTOM_EDITOR)
+    backup(CUSTOM_EDITOR, CLEAN_MARKERS["CUSTOM_EDITOR"])
     text = CUSTOM_EDITOR.read_text()
     if "topBorderProvider;" not in text:
         text = text.replace(
@@ -2003,7 +2008,7 @@ def patch_custom_editor() -> None:
     CUSTOM_EDITOR.write_text(text)
 
 def patch_terminal() -> None:
-    backup(TERMINAL)
+    backup(TERMINAL, CLEAN_MARKERS["TERMINAL"])
     text = TERMINAL.read_text()
     # Normalize any previous mouse-mode patch back to our desired mode.
     text = text.replace('process.stdout.write("\\x1b[?1000h\\x1b[?1006h");', 'process.stdout.write("\\x1b[?1002h\\x1b[?1006h");')
