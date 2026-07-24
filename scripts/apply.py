@@ -84,9 +84,12 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
                 for (const grandChild of child.children) {
                     const childLines = grandChild.render(width);
                     const startLine = lines.length;
-                    const preview = this.firstMeaningfulLine(childLines);
-                    if (preview) {
-                        spans.push({ start: startLine, end: startLine + childLines.length - 1, preview });
+                    // Only user messages are jump targets for the top bar.
+                    if (grandChild instanceof UserMessageComponent) {
+                        const preview = this.firstMeaningfulLine(childLines);
+                        if (preview) {
+                            spans.push({ start: startLine, end: startLine + childLines.length - 1, preview });
+                        }
                     }
                     for (const line of childLines) {
                         lines.push(line);
@@ -115,7 +118,7 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
     findPreviousMessage(spans, startLine) {
         let prev = undefined;
         for (const span of spans) {
-            if (span.start <= startLine && (!prev || span.start > prev.start)) {
+            if (span.start < startLine && (!prev || span.start > prev.start)) {
                 prev = span;
             }
         }
@@ -307,7 +310,7 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
         }
         if (eventType === "M" && (button & 3) === 0) {
             // Click on the pinned "previous message" bar → jump to that message.
-            if (this.topMessageTarget != null && this.scrollOffset > 0) {
+            if (this.topMessageTarget != null) {
                 const row = y - 1;
                 if (row >= 0 && row - this.lastTopPadding === 0) {
                     this.scrollToMessageStart(this.topMessageTarget);
@@ -391,19 +394,22 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
         visibleScroll = visibleScroll.map((line, idx) => this.applySelectionToLine(line, start + idx));
         this.topMessageTarget = undefined;
         this.topMessagePreview = "";
-        if (this.scrollOffset > 0 && visibleScroll.length > 0) {
-            const prev = this.findPreviousMessage(this.messageSpans, start);
-            let marker;
-            if (prev) {
-                this.topMessageTarget = prev.start;
-                this.topMessagePreview = prev.preview;
-                const snippet = truncateToWidth(prev.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
-                marker = theme.fg("accent", "↑") + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · ${this.scrollOffset}↑ · click to jump · Opt+↓/End to bottom`);
-            }
-            else {
-                marker = theme.fg("warning", `↑ scrolled ${this.scrollOffset} lines`) + theme.fg("dim", " · Opt+↓/End to bottom");
-            }
-            visibleScroll[0] = marker;
+        // First visible content line. When scrolled, the marker covers the line
+        // at `start`, so content begins at start+1; at the bottom it begins at
+        // `start`. We look for a user message strictly above that line so the
+        // bar can show (and jump) even when not scrolled.
+        const viewportTopContentLine = start + (this.scrollOffset > 0 ? 1 : 0);
+        const prev = this.findPreviousMessage(this.messageSpans, viewportTopContentLine);
+        if (prev && visibleScroll.length > 0) {
+            this.topMessageTarget = prev.start;
+            this.topMessagePreview = prev.preview;
+            const snippet = truncateToWidth(prev.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
+            const scrollInfo = this.scrollOffset > 0 ? `${this.scrollOffset}↑ · ` : "";
+            const bottomHint = this.scrollOffset > 0 ? " · Opt+↓/End to bottom" : "";
+            visibleScroll[0] = theme.fg("accent", "↑") + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · ${scrollInfo}click to jump${bottomHint}`);
+        }
+        else if (this.scrollOffset > 0 && visibleScroll.length > 0) {
+            visibleScroll[0] = theme.fg("warning", `↑ scrolled ${this.scrollOffset} lines`) + theme.fg("dim", " · Opt+↓/End to bottom");
         }
         if (this.lastTopPadding > 0) {
             visibleScroll = [...Array(this.lastTopPadding).fill(""), ...visibleScroll];
@@ -1535,7 +1541,8 @@ def patch_interactive() -> None:
         'this.fixedLayout.preserveScrollAnchor(applyExpansion);',
         'renderScrollLinesWithSpans(width)',
         'firstMeaningfulLine(childLines)',
-        'findPreviousMessage(this.messageSpans, start)',
+        'grandChild instanceof UserMessageComponent',
+        'findPreviousMessage(this.messageSpans, viewportTopContentLine)',
         'this.topMessageTarget = prev.start;',
         'scrollToMessageStart(this.topMessageTarget)',
         'this.chatContainer = chatContainer ?? scrollChildren[2];',

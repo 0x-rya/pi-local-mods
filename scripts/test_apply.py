@@ -74,7 +74,8 @@ class ApplyPatchResultTests(unittest.TestCase):
         # Pinned "previous message" jump bar at the top of the transcript.
         self.assertIn("renderScrollLinesWithSpans(width)", text)
         self.assertIn("firstMeaningfulLine(childLines)", text)
-        self.assertIn("findPreviousMessage(this.messageSpans, start)", text)
+        self.assertIn("grandChild instanceof UserMessageComponent", text)
+        self.assertIn("findPreviousMessage(this.messageSpans, viewportTopContentLine)", text)
         self.assertIn("this.topMessageTarget = prev.start;", text)
         self.assertIn("scrollToMessageStart(this.topMessageTarget)", text)
         self.assertIn("this.chatContainer = chatContainer ?? scrollChildren[2];", text)
