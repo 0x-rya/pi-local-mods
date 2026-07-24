@@ -6,6 +6,8 @@ on:
   pull_request:
 
 jobs:
+  # Fast, offline: patches apply to the frozen fixtures and produce valid JS.
+  # This is the required gate — it validates patch logic + JS syntax.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -18,3 +20,26 @@ jobs:
           node-version: "lts/*"
       - name: Patch tests (+ node --check on patched output)
         run: python3 -m unittest scripts.test_apply -v
+
+  # Informational: install the LATEST published Pi and confirm the patches still
+  # fit it. Surfaces upstream drift the moment a new Pi release breaks a patch.
+  # continue-on-error so feature work isn't blocked by an upstream change you
+  # haven't adapted to yet — the job status is still visible on every run.
+  drift:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+      - name: Install latest Pi
+        run: npm install -g @earendil-works/pi-coding-agent
+      - name: Drift smoke test vs latest Pi
+        run: |
+          export PI_CODING_AGENT_DIR="$(npm root -g)/@earendil-works/pi-coding-agent"
+          echo "Testing patches against latest Pi at $PI_CODING_AGENT_DIR"
+          python3 scripts/smoke.py
