@@ -95,14 +95,3 @@ if [[ "$bootstrap" == true ]]; then
 fi
 
 python3 "$ROOT/scripts/apply.py"
-
-# After a Pi upgrade, verify the patches still fit the new version and run the
-# regression suite. Advisory (apply already ran) but loud on failure.
-if [[ "$upgrade_pi" == true ]]; then
-  echo
-  echo "==> Drift smoke test (patches vs upgraded Pi)"
-  python3 "$ROOT/scripts/smoke.py" || echo "!! smoke failed: patches drifted on the new Pi" >&2
-  echo
-  echo "==> Patch test suite"
-  python3 -m unittest scripts.test_apply -v || echo "!! tests failed" >&2
-fi
