@@ -47,10 +47,18 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
     lastScrollLines = [];
     selection = undefined;
     selectionAutoCopy = /^(1|true|yes)$/i.test(process.env.PI_SELECTION_AUTO_COPY ?? "");
-    constructor(ui, scrollChildren, pinnedChildren) {
+    chatContainer;
+    messageSpans = [];
+    topMessageTarget;
+    topMessagePreview = "";
+    constructor(ui, scrollChildren, pinnedChildren, chatContainer) {
         this.ui = ui;
         this.scrollChildren = scrollChildren;
         this.pinnedChildren = pinnedChildren;
+        // chatContainer is scrollChildren[2]; the explicit arg lets future
+        // callers pass it directly. It maps transcript lines back to messages
+        // for the pinned "previous message" jump bar.
+        this.chatContainer = chatContainer ?? scrollChildren[2];
     }
     invalidate() {
         for (const child of [...this.scrollChildren, ...this.pinnedChildren]) {
@@ -63,6 +71,69 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
             lines.push(...child.render(width));
         }
         return lines;
+    }
+    // Render the scroll children, recording the line span of each chat message
+    // so the top "previous message" bar can preview/jump to it. Container.render
+    // is a pure concat of child.render(), so iterating chatContainer.children
+    // reproduces the exact same lines as chatContainer.render(width).
+    renderScrollLinesWithSpans(width) {
+        const lines = [];
+        const spans = [];
+        for (const child of this.scrollChildren) {
+            if (child === this.chatContainer && Array.isArray(child.children)) {
+                for (const grandChild of child.children) {
+                    const childLines = grandChild.render(width);
+                    const startLine = lines.length;
+                    const preview = this.firstMeaningfulLine(childLines);
+                    if (preview) {
+                        spans.push({ start: startLine, end: startLine + childLines.length - 1, preview });
+                    }
+                    for (const line of childLines) {
+                        lines.push(line);
+                    }
+                }
+            }
+            else {
+                const childLines = child.render(width);
+                for (const line of childLines) {
+                    lines.push(line);
+                }
+            }
+        }
+        this.messageSpans = spans;
+        return lines;
+    }
+    firstMeaningfulLine(childLines) {
+        for (const raw of childLines) {
+            const plain = this.stripAnsi(raw).trim();
+            if (plain && /\p{L}|\p{N}/u.test(plain)) {
+                return plain;
+            }
+        }
+        return "";
+    }
+    findPreviousMessage(spans, startLine) {
+        let prev = undefined;
+        for (const span of spans) {
+            if (span.start <= startLine && (!prev || span.start > prev.start)) {
+                prev = span;
+            }
+        }
+        return prev;
+    }
+    scrollToMessageStart(targetStart) {
+        const width = this.ui.terminal?.columns ?? 80;
+        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
+        const pinnedLines = this.renderChildren(this.pinnedChildren, width);
+        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
+        const visiblePinned = pinnedLines.slice(Math.max(0, pinnedLines.length - pinnedRows));
+        const transcriptRows = Math.max(1, termRows - visiblePinned.length);
+        const scrollLines = this.renderChildren(this.scrollChildren, width);
+        const maxStart = Math.max(0, scrollLines.length - transcriptRows);
+        // Land the target message's first line just below the top marker.
+        const newStart = Math.max(0, Math.min(targetStart - 1, maxStart));
+        this.scrollOffset = Math.max(0, Math.min(maxStart - newStart, this.maxScrollOffset(transcriptRows)));
+        this.ui.requestRender();
     }
     maxScrollOffset(viewportRows) {
         return Math.max(0, this.lastScrollableLineCount - viewportRows);
@@ -235,6 +306,14 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
             return { consume: true };
         }
         if (eventType === "M" && (button & 3) === 0) {
+            // Click on the pinned "previous message" bar → jump to that message.
+            if (this.topMessageTarget != null && this.scrollOffset > 0) {
+                const row = y - 1;
+                if (row >= 0 && row - this.lastTopPadding === 0) {
+                    this.scrollToMessageStart(this.topMessageTarget);
+                    return { consume: true };
+                }
+            }
             const pos = this.positionFromMouse(x, y);
             if (pos) {
                 this.startSelection(pos);
@@ -296,7 +375,7 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
         const visiblePinned = pinnedLines.slice(Math.max(0, pinnedLines.length - pinnedRows));
         let transcriptRows = Math.max(1, termRows - visiblePinned.length);
         const previousScrollableLineCount = this.lastScrollableLineCount;
-        const scrollLines = this.renderChildren(this.scrollChildren, width);
+        const scrollLines = this.renderScrollLinesWithSpans(width);
         this.lastScrollLines = scrollLines;
         if (this.scrollOffset > 0 && scrollLines.length > previousScrollableLineCount) {
             this.scrollOffset += scrollLines.length - previousScrollableLineCount;
@@ -310,8 +389,20 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
         let visibleScroll = scrollLines.slice(start, start + transcriptRows);
         this.lastTopPadding = Math.max(0, transcriptRows - visibleScroll.length);
         visibleScroll = visibleScroll.map((line, idx) => this.applySelectionToLine(line, start + idx));
+        this.topMessageTarget = undefined;
+        this.topMessagePreview = "";
         if (this.scrollOffset > 0 && visibleScroll.length > 0) {
-            const marker = theme.fg("warning", `↑ scrolled ${this.scrollOffset} lines`) + theme.fg("dim", " · Opt+↓/End to bottom");
+            const prev = this.findPreviousMessage(this.messageSpans, start);
+            let marker;
+            if (prev) {
+                this.topMessageTarget = prev.start;
+                this.topMessagePreview = prev.preview;
+                const snippet = truncateToWidth(prev.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
+                marker = theme.fg("accent", "↑") + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · ${this.scrollOffset}↑ · click to jump · Opt+↓/End to bottom`);
+            }
+            else {
+                marker = theme.fg("warning", `↑ scrolled ${this.scrollOffset} lines`) + theme.fg("dim", " · Opt+↓/End to bottom");
+            }
             visibleScroll[0] = marker;
         }
         if (this.lastTopPadding > 0) {
@@ -1442,6 +1533,12 @@ def patch_interactive() -> None:
         'this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
         'const applyExpansion = () => {',
         'this.fixedLayout.preserveScrollAnchor(applyExpansion);',
+        'renderScrollLinesWithSpans(width)',
+        'firstMeaningfulLine(childLines)',
+        'findPreviousMessage(this.messageSpans, start)',
+        'this.topMessageTarget = prev.start;',
+        'scrollToMessageStart(this.topMessageTarget)',
+        'this.chatContainer = chatContainer ?? scrollChildren[2];',
     ]
     missing_interactive = [needle for needle in required_interactive if needle not in text]
     if missing_interactive:
