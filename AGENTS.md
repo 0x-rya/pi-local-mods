@@ -4,12 +4,12 @@
 
 This repository is the dedicated place for local Pi modifications:
 
-`/Users/atan2/home/pi-local-mods`
+`~/home/pi-local-mods`
 
 For any Pi-related local change, do **not** edit installed package files directly, including files under:
 
-- `/Users/atan2/.pi/agent/npm/node_modules/`
-- `/Users/atan2/.nvm/versions/node/*/lib/node_modules/`
+- `~/.pi/agent/npm/node_modules/`
+- `~/.nvm/versions/node/*/lib/node_modules/`
 
 Instead:
 
