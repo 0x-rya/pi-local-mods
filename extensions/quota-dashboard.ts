@@ -376,15 +376,18 @@ export default function (pi: ExtensionAPI) {
     pi.sendUserMessage("/hotkeys");
   };
 
-  pi.registerShortcut("ctrl+?", {
-    description: "Show keyboard shortcuts",
-    handler: showHotkeys,
-  });
-
-  pi.registerShortcut("ctrl+/", {
-    description: "Show keyboard shortcuts",
-    handler: showHotkeys,
-  });
+  // "?" is Shift+"/", so pressing Ctrl+? is physically Ctrl+Shift+"/". A keyId
+  // of "ctrl+?" parses to modifier=ctrl only (the Shift is dropped) and never
+  // matches the real keypress. Under Kitty keyboard / modifyOtherKeys, Ctrl+?
+  // arrives with shift+ctrl set, reported either as the shifted codepoint "?"
+  // (63) or the base key "/" (47). Bind the shift-inclusive forms that actually
+  // match, plus "ctrl+/" as the unshifted alias.
+  for (const shortcut of ["ctrl+shift+?", "ctrl+shift+/", "ctrl+/", "ctrl+?"]) {
+    pi.registerShortcut(shortcut, {
+      description: "Show keyboard shortcuts",
+      handler: showHotkeys,
+    });
+  }
 
   const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
   const adjustThinking = (delta: -1 | 1) => {

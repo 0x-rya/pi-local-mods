@@ -21,12 +21,10 @@ jobs:
       - name: Patch tests (+ node --check on patched output)
         run: python3 -m unittest scripts.test_apply -v
 
-  # Informational: install the LATEST published Pi and confirm the patches still
-  # fit it. Surfaces upstream drift the moment a new Pi release breaks a patch.
-  # continue-on-error so feature work isn't blocked by an upstream change you
-  # haven't adapted to yet — the job status is still visible on every run.
+  # Install the LATEST published Pi and confirm the patches still fit it.
+  # Required: an upstream Pi release that breaks a patch fails the build and
+  # must be fixed (adapt apply.py, then refresh fixtures) before merging.
   drift:
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

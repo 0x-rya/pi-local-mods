@@ -45,7 +45,7 @@ The suite applies every patch to committed fixtures (snapshots of clean Pi sourc
 python3 -m unittest scripts.test_apply
 ```
 
-CI (`.github/workflows/test.yml`) runs this on every push/PR. A second, informational `drift` job installs the **latest published Pi** and smoke-tests the patches against it, so an upstream Pi release that breaks a patch is flagged immediately (non-blocking).
+CI (`.github/workflows/test.yml`) runs this on every push/PR. A second `drift` job installs the **latest published Pi** and smoke-tests the patches against it on every push/PR, so an upstream Pi release that breaks a patch fails the build and must be fixed before merging.
 
 ## Keeping up with `pi update`
 
