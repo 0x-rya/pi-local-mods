@@ -372,17 +372,27 @@ export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let sessionGeneration = 0;
 
-  const showHotkeys = async () => {
+  const showHotkeys = async (ctx?: { showHotkeys?: () => void }) => {
+    // Prefer the host's built-in hotkeys panel (exposed on the shortcut ctx by
+    // a local pi patch) over sendUserMessage, which would route "/hotkeys" to
+    // the model instead of running it as a command.
+    if (ctx?.showHotkeys) {
+      ctx.showHotkeys();
+      return;
+    }
     pi.sendUserMessage("/hotkeys");
   };
 
-  // "?" is Shift+"/", so pressing Ctrl+? is physically Ctrl+Shift+"/". A keyId
-  // of "ctrl+?" parses to modifier=ctrl only (the Shift is dropped) and never
-  // matches the real keypress. Under Kitty keyboard / modifyOtherKeys, Ctrl+?
-  // arrives with shift+ctrl set, reported either as the shifted codepoint "?"
-  // (63) or the base key "/" (47). Bind the shift-inclusive forms that actually
-  // match, plus "ctrl+/" as the unshifted alias.
-  for (const shortcut of ["ctrl+shift+?", "ctrl+shift+/", "ctrl+/", "ctrl+?"]) {
+  // Ctrl+? is awkward across terminal/protocol combos, so bind every encoding:
+  //  • ctrl+shift+? / ctrl+shift+/ — native Kitty/modifyOtherKeys (codepoint 63/47, shift+ctrl).
+  //  • ctrl+_ — tmux carries modifyOtherKeys (extended-keys) to inner apps, but tmux<->Ghostty
+  //    stays legacy, so Ctrl+? arrives as the 0x1f byte, which tmux upgrades to CSI-u codepoint
+  //    95 ("_") + ctrl = ESC[95;5u — i.e. it matches "ctrl+_". Undo is Ctrl+- = codepoint 45,
+  //    so it stays distinct and safe under modifyOtherKeys.
+  //  • alt+? / alt+/ — universal fallback (ESC? / ESC/) for terminals with no key-modifier
+  //    protocol. Caveat: on a *pure* legacy terminal "ctrl+_" also matches raw 0x1f = Undo,
+  //    so this shortcut shadows Undo only in that rare case.
+  for (const shortcut of ["ctrl+shift+?", "ctrl+shift+/", "ctrl+/", "alt+?", "alt+/", "ctrl+_"]) {
     pi.registerShortcut(shortcut, {
       description: "Show keyboard shortcuts",
       handler: showHotkeys,

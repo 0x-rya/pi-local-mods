@@ -1629,7 +1629,17 @@ def patch_interactive() -> None:
         if set_tools_expanded_native not in text:
             raise SystemExit("Could not find native setToolsExpanded to anchor ctrl+o scroll position")
         text = text.replace(set_tools_expanded_native, set_tools_expanded_anchored, 1)
+    # Expose handleHotkeysCommand to extension shortcut handlers so a shortcut
+    # (e.g. Ctrl+?) can render the keyboard-shortcuts panel directly. Without
+    # this, sendUserMessage("/hotkeys") goes to the model instead of the command.
+    _showhotkeys_line = "            showHotkeys: () => this.handleHotkeysCommand(),\n"
+    if "showHotkeys: () => this.handleHotkeysCommand()," not in text:
+        _ctx_anchor = "            getContextUsage: () => this.session.getContextUsage(),"
+        if _ctx_anchor not in text:
+            raise SystemExit("Could not find createContext anchor to expose showHotkeys")
+        text = text.replace(_ctx_anchor, _showhotkeys_line + _ctx_anchor, 1)
     required_interactive = [
+        'showHotkeys: () => this.handleHotkeysCommand(),',
         'bottomBorderWidgetStatus = "";',
         'bottomBorderWidgetLimits = "";',
         'compactLeanCtxStatus(text)',
