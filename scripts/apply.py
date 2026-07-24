@@ -413,10 +413,12 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
         this.bottomMessagePreview = "";
         this.lastTopBarRow = -1;
         this.lastBottomBarRow = -1;
-        // First visible content line. When scrolled, the marker covers the line
-        // at `start`, so content begins at start+1; at the bottom it begins at
-        // `start`. We look for a user message strictly above that line so the
-        // bar can show (and jump) even when not scrolled.
+        // Lines above the viewport = start; lines below = scrollOffset (newer
+        // content hidden underneath). The top bar reports above, the bottom bar
+        // below — so each arrow points at the content it describes.
+        const aboveCount = start;
+        const belowCount = this.scrollOffset;
+        const aboveLead = aboveCount > 0 ? `${aboveCount}↑` : "↑";
         const viewportTopContentLine = start + (this.scrollOffset > 0 ? 1 : 0);
         const prev = this.findPreviousMessage(this.messageSpans, viewportTopContentLine);
         if (prev && visibleScroll.length > 0) {
@@ -424,23 +426,27 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
             this.topMessagePreview = prev.preview;
             this.lastTopBarRow = this.lastTopPadding;
             const snippet = truncateToWidth(prev.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
-            const scrollInfo = this.scrollOffset > 0 ? `${this.scrollOffset}↑ · ` : "";
             const bottomHint = this.scrollOffset > 0 ? " · Opt+↓/End to bottom" : "";
-            visibleScroll[0] = theme.fg("accent", "↑") + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · ${scrollInfo}click to jump${bottomHint}`);
+            visibleScroll[0] = theme.fg("accent", aboveLead) + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · click to jump${bottomHint}`);
         }
         else if (this.scrollOffset > 0 && visibleScroll.length > 0) {
-            visibleScroll[0] = theme.fg("warning", `↑ scrolled ${this.scrollOffset} lines`) + theme.fg("dim", " · Opt+↓/End to bottom");
+            visibleScroll[0] = theme.fg("warning", aboveLead) + theme.fg("dim", " · Opt+↓/End to bottom");
         }
         // Bottom sticky bar: next user message below the viewport (scrolled only).
         if (this.scrollOffset > 0 && visibleScroll.length > 1) {
             const nextThreshold = start + visibleScroll.length - 1;
             const next = this.findNextMessage(this.messageSpans, nextThreshold);
+            const belowTag = `${belowCount}↓`;
+            this.lastBottomBarRow = this.lastTopPadding + (visibleScroll.length - 1);
             if (next) {
                 this.bottomMessageTarget = next.start;
                 this.bottomMessagePreview = next.preview;
-                this.lastBottomBarRow = this.lastTopPadding + (visibleScroll.length - 1);
                 const snippet = truncateToWidth(next.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
-                visibleScroll[visibleScroll.length - 1] = theme.fg("accent", "↓") + " " + theme.fg("muted", snippet) + theme.fg("dim", " · click to jump");
+                visibleScroll[visibleScroll.length - 1] = theme.fg("accent", belowTag) + " " + theme.fg("muted", snippet) + theme.fg("dim", " · click to jump");
+            }
+            else {
+                // No user message below, but newer content still exists below.
+                visibleScroll[visibleScroll.length - 1] = theme.fg("warning", belowTag) + theme.fg("dim", " · Opt+↓/End to bottom");
             }
         }
         if (this.lastTopPadding > 0) {
@@ -1576,6 +1582,9 @@ def patch_interactive() -> None:
         'grandChild instanceof UserMessageComponent',
         'findPreviousMessage(this.messageSpans, viewportTopContentLine)',
         'findNextMessage(this.messageSpans, nextThreshold)',
+        'const aboveCount = start;',
+        'const belowCount = this.scrollOffset;',
+        'theme.fg("warning", belowTag)',
         'this.topMessageTarget = prev.start;',
         'this.bottomMessageTarget = next.start;',
         'row === this.lastBottomBarRow',
