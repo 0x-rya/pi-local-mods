@@ -66,6 +66,11 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("refreshBottomBorderWidgetStatus(width)", text)
         self.assertIn("renderBottomBorderWidgetStatusLine(width)", text)
         self.assertIn("moveBottomWidgetStatusToEditorBorder(lines)", text)
+        # ctrl+o (toggle tool output) must anchor the top visible transcript
+        # line instead of letting the viewport jump.
+        self.assertIn("const applyExpansion = () => {", text)
+        self.assertIn("this.fixedLayout.preserveScrollAnchor(applyExpansion);", text)
+        self.assertEqual(text.count("this.fixedLayout.preserveScrollAnchor(applyExpansion);"), 1)
         self.assertIn("const trimmedPlain = plain.trimStart();", text)
         self.assertIn("/^Limits\\s*[|│]/", text)
         self.assertIn("/^\\s*Limits\\s*[|│]\\s*/", text)

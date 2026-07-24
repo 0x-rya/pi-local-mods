@@ -1377,6 +1377,58 @@ def patch_interactive() -> None:
 '''
     if "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {" in text:
         text = replace_js_method(text, "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {", new_render_widget_container)
+    # Anchor the top visible transcript line when toggling tool-output
+    # expansion (ctrl+o). Without this, expanding/collapsing a tool result
+    # while scrolled up in history shifts the viewport. preserveScrollAnchor
+    # is defined on FixedBottomScrollLayout but had no call site here.
+    set_tools_expanded_native = (
+        '    setToolsExpanded(expanded) {\n'
+        '        this.toolOutputExpanded = expanded;\n'
+        '        const activeHeader = this.customHeader ?? this.builtInHeader;\n'
+        '        if (isExpandable(activeHeader)) {\n'
+        '            activeHeader.setExpanded(expanded);\n'
+        '        }\n'
+        '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {\n'
+        '            for (const child of container.children) {\n'
+        '                if (isExpandable(child)) {\n'
+        '                    child.setExpanded(expanded);\n'
+        '                }\n'
+        '            }\n'
+        '        }\n'
+        '        this.ui.requestRender();\n'
+        '    }'
+    )
+    set_tools_expanded_anchored = (
+        '    setToolsExpanded(expanded) {\n'
+        '        this.toolOutputExpanded = expanded;\n'
+        '        const applyExpansion = () => {\n'
+        '            const activeHeader = this.customHeader ?? this.builtInHeader;\n'
+        '            if (isExpandable(activeHeader)) {\n'
+        '                activeHeader.setExpanded(expanded);\n'
+        '            }\n'
+        '            for (const container of [this.loadedResourcesContainer, this.chatContainer]) {\n'
+        '                for (const child of container.children) {\n'
+        '                    if (isExpandable(child)) {\n'
+        '                        child.setExpanded(expanded);\n'
+        '                    }\n'
+        '                }\n'
+        '            }\n'
+        '        };\n'
+        '        // Keep the first visible transcript line anchored so toggling\n'
+        '        // tool output (ctrl+o) does not shift the scroll position.\n'
+        '        if (this.fixedLayout?.preserveScrollAnchor) {\n'
+        '            this.fixedLayout.preserveScrollAnchor(applyExpansion);\n'
+        '        }\n'
+        '        else {\n'
+        '            applyExpansion();\n'
+        '            this.ui.requestRender();\n'
+        '        }\n'
+        '    }'
+    )
+    if set_tools_expanded_anchored not in text:
+        if set_tools_expanded_native not in text:
+            raise SystemExit("Could not find native setToolsExpanded to anchor ctrl+o scroll position")
+        text = text.replace(set_tools_expanded_native, set_tools_expanded_anchored, 1)
     required_interactive = [
         'bottomBorderWidgetStatus = "";',
         'bottomBorderWidgetLimits = "";',
@@ -1388,6 +1440,8 @@ def patch_interactive() -> None:
         'render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width))',
         'this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
         'this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
+        'const applyExpansion = () => {',
+        'this.fixedLayout.preserveScrollAnchor(applyExpansion);',
     ]
     missing_interactive = [needle for needle in required_interactive if needle not in text]
     if missing_interactive:
