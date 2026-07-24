@@ -223,6 +223,26 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertEqual(rc.read_text(), before)
         self.assertEqual(text.count("pi-hook.sh"), rc.read_text().count("pi-hook.sh"))
 
+    def test_post_update_failure_format(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("post_update", ROOT / "scripts" / "post_update.py")
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        msg = mod.format_failure(
+            "apply.py - re-patching the updated Pi",
+            "python3 scripts/apply.py",
+            "/tmp/x.log",
+            "==> step\nCould not apply footer pretty status patch: missing ['renderMainStatusLine(width)']\nTraceback\n",
+            Path("/repo"),
+        )
+        self.assertIn("pi-local-mods: re-apply after `pi update` FAILED", msg)
+        self.assertIn("│ step: apply.py", msg)
+        self.assertIn("Could not apply footer pretty status patch", msg)
+        self.assertIn("│ full log: /tmp/x.log", msg)
+        self.assertIn("cd /repo && python3 scripts/apply.py", msg)
+        self.assertIn("python3 scripts/refresh_fixtures.py", msg)
+
     def test_bg_tasks_shortcut_patch_final_result(self) -> None:
         package = self.root / "agent/npm/node_modules/pi-patty-bg-tasks"
         shortcuts_source = AGENT_FIXTURE / "npm/node_modules/pi-patty-bg-tasks/src/shortcuts.ts"
