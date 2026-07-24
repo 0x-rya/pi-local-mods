@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,15 @@ class ApplyPatchResultTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         return target
+
+    def assertNodeChecks(self, path: Path) -> None:
+        # Validates that a patched JS file is at least syntactically valid.
+        # Skipped when node isn't installed (e.g. a plain Python env).
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, f"{path} failed node --check:\n{result.stderr}")
 
     def test_interactive_patch_final_result(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
@@ -100,6 +110,7 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("capturedTerminalLogHitRegions.push({ type: \"toggle\", id: entry.id, row, startCol: 0", text)
         self.assertIn("const submission = await this.prepareClipboardImageSubmission(text);", text)
         self.assertNotIn("const submission = this.prepareClipboardImageSubmission(text);", text)
+        self.assertNodeChecks(interactive)
 
     def test_interactive_patch_repairs_legacy_unawaited_clipboard_submission(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
@@ -140,6 +151,7 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn('process.stdout.write("\\x1b[?1002h\\x1b[?1006h");', text)
         self.assertIn('process.stdout.write("\\x1b[?1002l\\x1b[?1006l");', text)
         self.assertIn("Enable button-event mouse tracking with SGR encoding", text)
+        self.assertNodeChecks(terminal)
 
     def test_bg_tasks_shortcut_patch_final_result(self) -> None:
         package = self.root / "agent/npm/node_modules/pi-patty-bg-tasks"
