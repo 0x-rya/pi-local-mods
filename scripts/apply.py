@@ -425,9 +425,17 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
             this.topMessageTarget = prev.start;
             this.topMessagePreview = prev.preview;
             this.lastTopBarRow = this.lastTopPadding;
-            const snippet = truncateToWidth(prev.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
             const bottomHint = this.scrollOffset > 0 ? " · Opt+↓/End to bottom" : "";
-            visibleScroll[0] = theme.fg("accent", aboveLead) + " " + theme.fg("muted", snippet) + theme.fg("dim", ` · click to jump${bottomHint}`);
+            const topSuffix = ` · click to jump${bottomHint}`;
+            // Budget the preview against the prefix (lead + separator) and the
+            // suffix so the assembled bar can never exceed the terminal width.
+            const topAvail = Math.max(0, width - (visibleWidth(aboveLead) + 1) - visibleWidth(topSuffix));
+            const snippet = truncateToWidth(prev.preview, topAvail, theme.fg("dim", "…"));
+            let topLine = theme.fg("accent", aboveLead) + " " + theme.fg("muted", snippet) + theme.fg("dim", topSuffix);
+            if (visibleWidth(topLine) > width) {
+                topLine = truncateToWidth(topLine, width, theme.fg("dim", "…"));
+            }
+            visibleScroll[0] = topLine;
         }
         else if (this.scrollOffset > 0 && visibleScroll.length > 0) {
             visibleScroll[0] = theme.fg("warning", aboveLead) + theme.fg("dim", " · Opt+↓/End to bottom");
@@ -441,8 +449,14 @@ FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
             if (next) {
                 this.bottomMessageTarget = next.start;
                 this.bottomMessagePreview = next.preview;
-                const snippet = truncateToWidth(next.preview, Math.max(10, Math.floor(width * 0.7)), theme.fg("dim", "…"));
-                visibleScroll[visibleScroll.length - 1] = theme.fg("accent", belowTag) + " " + theme.fg("muted", snippet) + theme.fg("dim", " · click to jump");
+                const bottomSuffix = " · click to jump";
+                const bottomAvail = Math.max(0, width - (visibleWidth(belowTag) + 1) - visibleWidth(bottomSuffix));
+                const snippet = truncateToWidth(next.preview, bottomAvail, theme.fg("dim", "…"));
+                let bottomLine = theme.fg("accent", belowTag) + " " + theme.fg("muted", snippet) + theme.fg("dim", bottomSuffix);
+                if (visibleWidth(bottomLine) > width) {
+                    bottomLine = truncateToWidth(bottomLine, width, theme.fg("dim", "…"));
+                }
+                visibleScroll[visibleScroll.length - 1] = bottomLine;
             }
             else {
                 // No user message below, but newer content still exists below.
