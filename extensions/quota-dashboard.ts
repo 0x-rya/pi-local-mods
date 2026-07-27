@@ -516,9 +516,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", (_event, ctx) => {
-    void refreshLeanAndRender(ctx);
-    // A turn just consumed zai quota; refresh live remaining usage.
-    void fetchZaiQuota().then((ok) => { if (ok) render(ctx, pi); });
+    const generation = sessionGeneration;
+    void refreshLeanAndRender(ctx, generation);
+    // A turn just consumed zai quota; refresh live remaining usage. The fetch
+    // may outlive this session, so never render through a stale event context.
+    void fetchZaiQuota().then((ok) => {
+      if (ok && generation === sessionGeneration) render(ctx, pi);
+    });
   });
 
   pi.registerCommand("limits", {
