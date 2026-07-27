@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 import subprocess
 import tempfile
@@ -47,6 +48,13 @@ class ApplyPatchResultTests(unittest.TestCase):
             self.skipTest("node not installed")
         result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, f"{path} failed node --check:\n{result.stderr}")
+
+    def assertNodeScript(self, script: str) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        result = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, f"node behavior check failed:\n{result.stdout}\n{result.stderr}")
 
     def test_interactive_patch_final_result(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
@@ -99,7 +107,12 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("const trimmedPlain = plain.trimStart();", text)
         self.assertIn("/^Limits\\s*[|│]/", text)
         self.assertIn("/^\\s*Limits\\s*[|│]\\s*/", text)
-        self.assertIn("render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width))", text)
+        self.assertIn("coalesceQuotaDashboardLines(lines)", text)
+        self.assertIn("quotaDashboardLines(component, width)", text)
+        self.assertIn('const component = this.extensionWidgetsBelow.get("quota-dashboard");', text)
+        self.assertIn("return this.coalesceQuotaDashboardLines(component?.render(width) ?? []);", text)
+        self.assertIn("The editor bottom-border provider owns this widget.", text)
+        self.assertNotIn("Math.max(width, 4096)", text)
         self.assertIn("this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");", text)
         self.assertIn("this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");", text)
         self.assertNotIn("setBottomBorderProvider?.((width) => this.footer.renderExtensionStatusLine?.(width)", text)
@@ -112,6 +125,57 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("const submission = await this.prepareClipboardImageSubmission(text);", text)
         self.assertNotIn("const submission = this.prepareClipboardImageSubmission(text);", text)
         self.assertNodeChecks(interactive)
+
+        # Re-applying must not accumulate duplicate injected methods.
+        first_apply = interactive.read_bytes()
+        self.mod.patch_interactive()
+        self.assertEqual(interactive.read_bytes(), first_apply)
+        reapplied = interactive.read_text()
+        self.assertEqual(reapplied.count("    stripStatusAnsi(text) {"), 1)
+        self.assertEqual(reapplied.count("    coalesceQuotaDashboardLines(lines) {"), 1)
+        self.assertEqual(reapplied.count("    renderBottomBorderWidgetStatusLine(width) {"), 1)
+
+    def test_interactive_patch_migrates_previous_status_implementation(self) -> None:
+        source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
+        fresh = self.copy_fixture(source, "fresh/interactive-mode.js")
+        legacy = self.copy_fixture(source, "legacy/interactive-mode.js")
+
+        self.mod.INTERACTIVE = fresh
+        self.mod.patch_interactive()
+        expected = fresh.read_bytes()
+
+        self.mod.INTERACTIVE = legacy
+        self.mod.patch_interactive()
+        legacy_text = legacy.read_text()
+        block_start = legacy_text.index("    stripStatusAnsi(text) {")
+        block_end = legacy_text.index("    renderWidgets() {", block_start)
+        current_block = legacy_text[block_start:block_end]
+        # The previous patch could accumulate duplicate methods and used a
+        # finite-width quota probe inside renderWidgetContainer().
+        legacy_text = legacy_text[:block_start] + current_block + current_block + legacy_text[block_end:]
+        old_container = r'''    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+        container.clear();
+        for (const [id, component] of widgets.entries()) {
+            container.addChild({
+                render: (width) => id === "quota-dashboard"
+                    ? this.moveBottomWidgetStatusToEditorBorder(component.render(Math.max(width, 4096)))
+                    : component.render(width),
+                invalidate: () => component.invalidate?.(),
+            });
+        }
+    }'''
+        legacy_text = self.mod.replace_js_method(
+            legacy_text,
+            "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {",
+            old_container,
+        )
+        legacy.write_text(legacy_text)
+
+        self.mod.patch_interactive()
+        self.assertEqual(legacy.read_bytes(), expected)
+        migrated = legacy.read_text()
+        self.assertNotIn("Math.max(width, 4096)", migrated)
+        self.assertEqual(migrated.count("    stripStatusAnsi(text) {"), 1)
 
     def test_interactive_patch_repairs_legacy_unawaited_clipboard_submission(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
@@ -135,6 +199,230 @@ class ApplyPatchResultTests(unittest.TestCase):
         repaired_text = interactive.read_text()
         self.assertNotIn(unawaited_call, repaired_text)
         self.assertEqual(repaired_text.count(awaited_call), patched_text.count(awaited_call))
+
+    def test_quota_dashboard_resize_behavior(self) -> None:
+        source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
+        interactive = self.copy_fixture(source, "pi/dist/modes/interactive/interactive-mode.js")
+        self.mod.INTERACTIVE = interactive
+        self.mod.patch_interactive()
+        text = interactive.read_text()
+        start = text.index("    stripStatusAnsi(text) {")
+        end = text.index("    renderWidgets() {", start)
+        methods = text[start:end]
+
+        pi_tui = self.mod.PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/index.js"
+        if not pi_tui.exists():
+            self.skipTest("installed pi-tui is required for real display-width behavior checks")
+        script = (
+            f'import {{ Container, Text, truncateToWidth, visibleWidth }} from {json.dumps(pi_tui.as_uri())};\n'
+            'import { stripVTControlCharacters as stripAnsi } from "node:util";\n'
+            + r'''
+const theme = {
+  fg: (_color, text) => `\x1b[36m${text}\x1b[0m`,
+  bold: (text) => text,
+};
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+class Harness {
+  constructor() {
+    this.bottomBorderWidgetStatus = "";
+    this.bottomBorderWidgetLimits = "";
+    this.extensionWidgetsBelow = new Map();
+  }
+''' + methods + r'''}
+
+let quotaRenderCalls = 0;
+let unrelatedRenderCalls = 0;
+const dashboardLines = [
+  "\x1b[35mLimits\x1b[0m │ Codex 5h: 84% left (in 2h) · wk: 100% left (in 5d 18h) │ 模型👩‍💻é 5h: — · wk: —",
+  "\x1b[35mActive\x1b[0m │ openai-codex/gpt │ lean-ctx on saved 55.7M tok 81.9% $141.82",
+];
+const quotaContainer = new Container();
+for (const line of dashboardLines) quotaContainer.addChild(new Text(line, 1, 0));
+const quota = {
+  render(width) { quotaRenderCalls++; return quotaContainer.render(width); },
+};
+const unrelated = { render() { unrelatedRenderCalls++; return ["other widget"]; } };
+const harness = new Harness();
+harness.extensionWidgetsBelow = new Map([["quota-dashboard", quota], ["other", unrelated]]);
+const rendered = [];
+for (const width of [160, 72, 5, 4, 3, 2, 1, 0, 160]) {
+  const line = harness.renderBottomBorderWidgetStatusLine(width);
+  rendered.push(stripAnsi(line));
+  assert(visibleWidth(line) <= width, `line exceeded ${width}: ${visibleWidth(line)}`);
+  assert(!stripAnsi(line).includes("\x1b"), "render left an unterminated/unsupported escape sequence");
+  if (width >= 72) {
+    assert(harness.bottomBorderWidgetStatus.includes("$141.82"), "lean-ctx cost was orphaned");
+    assert(harness.bottomBorderWidgetLimits.includes("Codex"), "limits row was lost");
+  }
+}
+assert(rendered[0] === rendered[rendered.length - 1], "wide → narrow → wide output was unstable");
+assert(quotaRenderCalls === 8, `quota Text container rendered ${quotaRenderCalls} times instead of once per positive-width border pass`);
+assert(unrelatedRenderCalls === 0, "border refresh rendered an unrelated widget");
+
+const legacy = {
+  render() {
+    return [
+      "Limits │ Codex 5h: 84% left (in 2h)",
+      "· wk: 100% left (in 5d 18h)",
+      "Active │ openai-codex/gpt │ lean-ctx on saved",
+      "55.7M tok 81.9% $141.82",
+    ];
+  },
+};
+const fallback = harness.quotaDashboardLines(legacy, 32);
+assert(fallback.statusLines.length === 2, "wrapped legacy rows were not coalesced");
+harness.bottomBorderWidgetStatus = "";
+harness.bottomBorderWidgetLimits = "";
+assert(harness.moveBottomWidgetStatusToEditorBorder(fallback.statusLines).length === 0, "status fragments leaked");
+assert(harness.bottomBorderWidgetStatus.includes("$141.82"), "coalesced cost was lost");
+'''
+        )
+        self.assertNodeScript(script)
+
+    def test_footer_resize_behavior(self) -> None:
+        methods = self.mod.FOOTER_RENDER_METHOD
+        pi_tui = self.mod.PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/index.js"
+        if not pi_tui.exists():
+            self.skipTest("installed pi-tui is required for real display-width behavior checks")
+        script = (
+            f'import {{ truncateToWidth, visibleWidth }} from {json.dumps(pi_tui.as_uri())};\n'
+            'import { stripVTControlCharacters as stripAnsi } from "node:util";\n'
+            + r'''
+const theme = {
+  fg: (_color, text) => `\x1b[36m${text}\x1b[0m`,
+  bold: (text) => text,
+};
+const createUsageTotals = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+const addUsageToTotals = (totals, usage) => {
+  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) totals[key] += usage[key] ?? 0;
+  totals.cost += usage.cost?.total ?? 0;
+};
+const formatTokens = (count) => count >= 1000000 ? `${(count / 1000000).toFixed(1)}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : `${count}`;
+const formatCwdForFooter = (cwd, home) => cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+const areExperimentalFeaturesEnabled = () => false;
+const sanitizeStatusText = (text) => text;
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+class FooterHarness {
+  constructor(session, footerData) {
+    this.session = session;
+    this.footerData = footerData;
+    this.autoCompactEnabled = true;
+    this.mainLineVisible = true;
+  }
+''' + methods + r'''}
+const usage = { input: 100000, output: 92000, cacheRead: 33000000, cacheWrite: 12000, cost: { total: 141.82 } };
+const session = {
+  state: {
+    model: {
+      provider: "openai-codex",
+      id: "gpt-very-long-model-name-that-must-be-dropped-before-important-token-fields-are-clipped",
+      contextWindow: 272000,
+      reasoning: true,
+    },
+    thinkingLevel: "high",
+  },
+  sessionManager: {
+    getEntries: () => [{ type: "message", message: { role: "assistant", usage } }],
+    getCwd: () => "/Users/test/home/jkdb/模型👩‍💻é",
+    getSessionName: () => undefined,
+  },
+  getContextUsage: () => ({ contextWindow: 272000, percent: 43 }),
+  modelRuntime: { isUsingOAuth: () => false },
+};
+const footerData = {
+  getGitBranch: () => "main",
+  getExtensionStatuses: () => new Map(),
+};
+const footer = new FooterHarness(session, footerData);
+const wide = footer.renderMainStatusLine(260);
+const medium = footer.renderMainStatusLine(165);
+const narrow = footer.renderMainStatusLine(72);
+const wideAgain = footer.renderMainStatusLine(260);
+const extreme = [0, 1, 2, 3, 4, 5].map((width) => [width, footer.renderMainStatusLine(width)]);
+for (const [width, line] of [[260, wide], [165, medium], [72, narrow], ...extreme]) {
+  assert(visibleWidth(line) <= width, `footer exceeded ${width}: ${visibleWidth(line)}`);
+  assert(!stripAnsi(line).includes("\x1b"), "footer left an unterminated/unsupported escape sequence");
+}
+assert(stripAnsi(wide) === stripAnsi(wideAgain), "wide → narrow → wide footer was unstable");
+assert(stripAnsi(wide).includes("ai openai-codex/"), "wide footer unexpectedly dropped the model");
+assert(!stripAnsi(medium).includes("ai openai-codex/"), "medium footer kept the model instead of complete metrics");
+assert(stripAnsi(medium).includes("CH99.7%"), "cache-hit metric was clipped mid-field");
+assert(stripAnsi(medium).includes("$141.820"), "cost metric was clipped mid-field");
+assert(!stripAnsi(medium).includes("…"), "medium footer used character truncation unnecessarily");
+assert(!stripAnsi(narrow).includes("…"), "narrow footer failed to drop whole optional fields");
+'''
+        )
+        self.assertNodeScript(script)
+
+    def test_quota_dashboard_extension_factory(self) -> None:
+        pi_package = self.mod.PI_PACKAGE
+        pi_tui = pi_package / "node_modules/@earendil-works/pi-tui/dist/index.js"
+        jiti = pi_package / "node_modules/jiti/lib/jiti-static.mjs"
+        extension = ROOT / "extensions/quota-dashboard.ts"
+        if not pi_tui.exists() or not jiti.exists():
+            self.skipTest("installed Pi + jiti are required for extension integration checks")
+
+        home = self.root / "extension-home"
+        auth = home / ".pi/agent/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text('{"openai-codex":{"key":"test"}}')
+        script = f'''
+import {{ createJiti }} from {json.dumps(jiti.as_uri())};
+import {{ Container, Text, visibleWidth }} from {json.dumps(pi_tui.as_uri())};
+process.env.HOME = {json.dumps(str(home))};
+const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
+const jiti = createJiti(import.meta.url, {{
+  moduleCache: false,
+  alias: {{ "@earendil-works/pi-tui": {json.dumps(str(pi_tui))} }},
+}});
+const factory = await jiti.import({json.dumps(str(extension))}, {{ default: true }});
+assert(typeof factory === "function", "extension did not load as a factory");
+const handlers = new Map();
+const pi = {{
+  on(name, handler) {{ handlers.set(name, handler); }},
+  registerShortcut() {{}},
+  registerCommand() {{}},
+  getThinkingLevel() {{ return "high"; }},
+  setThinkingLevel() {{}},
+  sendUserMessage() {{}},
+}};
+factory(pi);
+assert(handlers.has("model_select"), "model_select handler was not registered");
+const widgetUpdates = [];
+const theme = {{
+  fg: (_color, text) => `\x1b[36m${{text}}\x1b[0m`,
+  bold: (text) => text,
+}};
+const ctx = {{
+  hasUI: true,
+  model: {{ provider: "openai-codex", id: "gpt-test" }},
+  ui: {{
+    theme,
+    setWidget(id, value, options) {{ widgetUpdates.push({{ id, value, options }}); }},
+  }},
+}};
+await handlers.get("model_select")({{}}, ctx);
+await handlers.get("model_select")({{}}, ctx);
+assert(widgetUpdates.length === 2, "widget replacement did not publish twice");
+for (const update of widgetUpdates) {{
+  assert(update.id === "quota-dashboard", "wrong widget id");
+  assert(update.options?.placement === "belowEditor", "wrong widget placement");
+  assert(Array.isArray(update.value), "widget did not use the documented string-array API");
+  assert(update.value.length === 2, "dashboard did not publish two logical rows");
+  const component = new Container();
+  for (const line of update.value) component.addChild(new Text(line, 1, 0));
+  for (const width of [8, 40, 72, 160]) {{
+    const lines = component.render(width);
+    assert(lines.length > 0, `Text container rendered no rows at ${{width}}`);
+    for (const line of lines) {{
+      assert(visibleWidth(line) <= width, `Text container exceeded ${{width}} columns`);
+    }}
+  }}
+  component.invalidate();
+  component.dispose?.();
+}}
+'''
+        self.assertNodeScript(script)
 
     def test_terminal_patch_final_result(self) -> None:
         source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
@@ -167,7 +455,10 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("setMainLineVisible(visible)", text)
         self.assertIn("renderMainStatusLine(width)", text)
         self.assertIn('labelled("git", branch, "warning")', text)
-        self.assertIn('labelled("ai", modelDisplay, "accent")', text)
+        self.assertIn('parts.push(labelled("ai", modelDisplay, "accent"))', text)
+        self.assertIn("const candidates = [buildRight(tokenParts.length, true), buildRight(tokenParts.length, false)]", text)
+        self.assertIn("candidates.push(buildRight(tokenCount, false))", text)
+        self.assertIn("right = buildRight(0, false)", text)
         self.assertIn("if (this.mainLineVisible !== false)", text)
         self.assertNodeChecks(footer)
 

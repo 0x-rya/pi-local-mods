@@ -1468,12 +1468,40 @@ def patch_interactive() -> None:
         }
         return parts.length ? `${theme.fg("dim", "lim")} ${parts.join(theme.fg("dim", " · "))}` : "";
     }
+    coalesceQuotaDashboardLines(lines) {
+        const statusLines = [];
+        const kept = [];
+        let current;
+        const flush = () => {
+            if (current) statusLines.push(current);
+            current = undefined;
+        };
+        for (const line of lines) {
+            const plain = this.stripStatusAnsi(line).trim();
+            if (/^(?:Limits|Active)(?:\s*[|│]|$)/.test(plain)) {
+                flush();
+                current = plain;
+            }
+            else if (current) {
+                current += ` ${plain}`;
+            }
+            else {
+                kept.push(line);
+            }
+        }
+        flush();
+        return { statusLines, kept };
+    }
+    quotaDashboardLines(component, width) {
+        return this.coalesceQuotaDashboardLines(component?.render(width) ?? []);
+    }
     refreshBottomBorderWidgetStatus(width) {
         this.bottomBorderWidgetStatus = "";
         this.bottomBorderWidgetLimits = "";
-        for (const component of this.extensionWidgetsBelow.values()) {
-            this.moveBottomWidgetStatusToEditorBorder(component.render(width));
-        }
+        const component = this.extensionWidgetsBelow.get("quota-dashboard");
+        if (!component) return;
+        const { statusLines } = this.quotaDashboardLines(component, width);
+        this.moveBottomWidgetStatusToEditorBorder(statusLines);
     }
     renderBottomBorderWidgetStatusLine(width) {
         if (width <= 0) {
@@ -1494,9 +1522,7 @@ def patch_interactive() -> None:
         }
         const used = visibleWidth(left) + visibleWidth(right);
         const rail = theme.fg("borderMuted", "─".repeat(Math.max(0, width - used - (left && right ? 2 : left || right ? 1 : 0))));
-        if (left && right) return `${left} ${rail} ${right}`;
-        if (left) return `${left} ${rail}`;
-        return `${rail} ${right}`;
+        return [left, rail, right].filter(Boolean).join(" ");
     }
     moveBottomWidgetStatusToEditorBorder(lines) {
         const kept = [];
@@ -1517,8 +1543,10 @@ def patch_interactive() -> None:
         return kept;
     }
 '''
-    if "    renderBottomBorderWidgetStatusLine(width) {" in text:
-        start = text.index("    renderBottomBorderWidgetStatusLine(width) {")
+    if "    stripStatusAnsi(text) {" in text:
+        # Replace the complete injected block so repeated apply.sh runs are
+        # byte-for-byte idempotent instead of accumulating duplicate methods.
+        start = text.index("    stripStatusAnsi(text) {")
         end = text.index("    renderWidgets() {", start)
         text = text[:start] + bottom_status_methods + text[end:]
     else:
@@ -1586,9 +1614,17 @@ def patch_interactive() -> None:
             }
             return;
         }
-        for (const component of widgets.values()) {
+        for (const [id, component] of widgets.entries()) {
             container.addChild({
-                render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width)),
+                render: (width) => {
+                    if (id === "quota-dashboard") {
+                        // The editor bottom-border provider owns this widget. It
+                        // renders and coalesces the normal Text container once;
+                        // suppress the consumed widget rows below the editor.
+                        return [];
+                    }
+                    return this.moveBottomWidgetStatusToEditorBorder(component.render(width));
+                },
                 invalidate: () => component.invalidate?.(),
                 dispose: () => component.dispose?.(),
             });
@@ -1596,7 +1632,7 @@ def patch_interactive() -> None:
     }
 '''
     if "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {" in text:
-        text = replace_js_method(text, "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {", new_render_widget_container)
+        text = replace_js_method(text, "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {", new_render_widget_container.rstrip("\n"))
     # Anchor the top visible transcript line when toggling tool-output
     # expansion (ctrl+o). Without this, expanding/collapsing a tool result
     # while scrolled up in history shifts the viewport. preserveScrollAnchor
@@ -1667,7 +1703,11 @@ def patch_interactive() -> None:
         'refreshBottomBorderWidgetStatus(width)',
         'renderBottomBorderWidgetStatusLine(width)',
         'moveBottomWidgetStatusToEditorBorder(lines)',
-        'render: (width) => this.moveBottomWidgetStatusToEditorBorder(component.render(width))',
+        'coalesceQuotaDashboardLines(lines)',
+        'quotaDashboardLines(component, width)',
+        'const component = this.extensionWidgetsBelow.get("quota-dashboard");',
+        'return this.coalesceQuotaDashboardLines(component?.render(width) ?? []);',
+        'The editor bottom-border provider owns this widget.',
         'this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
         'this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
         'const applyExpansion = () => {',
@@ -1836,36 +1876,50 @@ FOOTER_RENDER_METHOD = r'''    setMainLineVisible(visible) {
             : contextPercentValue > 70
                 ? theme.fg("warning", contextPercentDisplay)
                 : theme.fg("success", contextPercentDisplay);
-        const rightParts = [];
-        if (branch) {
-            rightParts.push(labelled("git", branch, "warning"));
-        }
-        rightParts.push(`${theme.fg("dim", "ctx")} ${contextValue}`);
-        if (tokenParts.length > 0) {
-            rightParts.push(labelled("tok", tokenParts.join(" ")));
-        }
-        if (areExperimentalFeaturesEnabled()) {
-            rightParts.push(`${theme.fg("dim", "xp")} ${theme.bold(theme.fg("warning", "on"))}`);
-        }
         const modelName = state.model?.id || "no-model";
         let modelDisplay = state.model ? `${state.model.provider}/${modelName}` : modelName;
         if (state.model?.reasoning) {
             const thinkingLevel = state.thinkingLevel || "off";
             modelDisplay += thinkingLevel === "off" ? " thinking off" : ` ${thinkingLevel}`;
         }
-        rightParts.push(labelled("ai", modelDisplay, "accent"));
+        const buildRight = (tokenCount, includeModel) => {
+            const parts = [];
+            if (branch) {
+                parts.push(labelled("git", branch, "warning"));
+            }
+            parts.push(`${theme.fg("dim", "ctx")} ${contextValue}`);
+            if (tokenCount > 0) {
+                parts.push(labelled("tok", tokenParts.slice(0, tokenCount).join(" ")));
+            }
+            if (areExperimentalFeaturesEnabled()) {
+                parts.push(`${theme.fg("dim", "xp")} ${theme.bold(theme.fg("warning", "on"))}`);
+            }
+            if (includeModel) {
+                parts.push(labelled("ai", modelDisplay, "accent"));
+            }
+            return joinPretty(parts);
+        };
         let left = theme.fg("accent", cwd);
         if (sessionName) {
             left += `${theme.fg("dim", " • ")}${theme.fg("muted", sessionName)}`;
         }
-        let right = joinPretty(rightParts);
         const minGap = 3;
         const leftWidth = visibleWidth(left);
-        const rightWidth = visibleWidth(right);
-        if (leftWidth + minGap + rightWidth <= width) {
-            const railWidth = Math.max(1, width - leftWidth - rightWidth - 2);
+        // Reduce by semantic units instead of clipping through a token or label:
+        // the model is lowest priority, followed by token details from the end.
+        const candidates = [buildRight(tokenParts.length, true), buildRight(tokenParts.length, false)];
+        for (let tokenCount = tokenParts.length - 1; tokenCount >= 0; tokenCount--) {
+            candidates.push(buildRight(tokenCount, false));
+        }
+        let right = candidates.find((candidate, index) => candidates.indexOf(candidate) === index && leftWidth + minGap + visibleWidth(candidate) <= width);
+        if (right !== undefined) {
+            const railWidth = Math.max(1, width - leftWidth - visibleWidth(right) - 2);
             return `${left} ${theme.fg("borderMuted", "─".repeat(railWidth))} ${right}`;
         }
+        // At extreme widths even cwd + git/context cannot fit. Only then fall
+        // back to ANSI-aware truncation, reserving space for both sides.
+        right = buildRight(0, false);
+        const rightWidth = visibleWidth(right);
         const rightLimit = Math.max(0, Math.min(rightWidth, Math.floor(width * 0.58)));
         right = rightLimit > 0 && rightWidth > rightLimit ? truncateToWidth(right, rightLimit, theme.fg("dim", "…")) : rightLimit > 0 ? right : "";
         const separatorWidth = right ? 1 : 0;
