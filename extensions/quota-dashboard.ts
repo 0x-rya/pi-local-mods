@@ -256,7 +256,18 @@ function zaiBucketFromLimit(item: any, source: string): WindowLimit | undefined 
   };
 }
 
-async function fetchZaiQuota(): Promise<boolean> {
+let zaiQuotaFetchInFlight: Promise<boolean> | undefined;
+
+function fetchZaiQuota(): Promise<boolean> {
+  if (zaiQuotaFetchInFlight) return zaiQuotaFetchInFlight;
+  const request = fetchZaiQuotaOnce().finally(() => {
+    if (zaiQuotaFetchInFlight === request) zaiQuotaFetchInFlight = undefined;
+  });
+  zaiQuotaFetchInFlight = request;
+  return request;
+}
+
+async function fetchZaiQuotaOnce(): Promise<boolean> {
   const key = readZaiApiKey();
   if (!key) return false;
   let body: any;
