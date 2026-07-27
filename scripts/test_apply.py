@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 APPLY_PATH = ROOT / "scripts" / "apply.py"
@@ -242,6 +243,157 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("│ full log: /tmp/x.log", msg)
         self.assertIn("cd /repo && python3 scripts/apply.py", msg)
         self.assertIn("python3 scripts/refresh_fixtures.py", msg)
+
+    def test_lean_ctx_session_cwd_patch_final_result(self) -> None:
+        package = self.root / "agent/npm/node_modules/pi-lean-ctx"
+        index_source = AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/index.ts"
+        bridge_source = AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/mcp-bridge.ts"
+        self.assertNotIn("[pi-local-mods]", index_source.read_text())
+        self.assertNotIn("cwd: this.cwd", bridge_source.read_text())
+
+        index = self.copy_fixture(
+            index_source,
+            "agent/npm/node_modules/pi-lean-ctx/extensions/index.ts",
+        )
+        bridge = self.copy_fixture(
+            bridge_source,
+            "agent/npm/node_modules/pi-lean-ctx/extensions/mcp-bridge.ts",
+        )
+        self.mod.LEAN_CTX_PACKAGE = package
+        self.mod.LEAN_CTX_INDEX = index
+        self.mod.LEAN_CTX_MCP_BRIDGE = bridge
+
+        self.mod.patch_lean_ctx_session_cwd()
+        index_text = index.read_text()
+        bridge_text = bridge.read_text()
+
+        self.assertIn("[pi-local-mods] Bind all session-scoped work to ctx.cwd", index_text)
+        self.assertIn('pi.on("session_start", async (_event, ctx) => {', index_text)
+        self.assertIn("if (mcpBridge) return;", index_text)
+        self.assertIn(
+            "new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {\n        cwd: ctx.cwd,",
+            index_text,
+        )
+        self.assertNotIn("mcpBridge = enableMcpBridge\n    ? new McpBridge", index_text)
+        self.assertIn("createCompressedBashTool(ctx.cwd)", index_text)
+        self.assertIn("createReadToolDefinition(ctx.cwd).execute", index_text)
+        self.assertIn("execLeanCtx(pi, params.args, ctx.cwd)", index_text)
+        self.assertIn('{ cwd: ctx.cwd }', index_text)
+        self.assertIn("[pi-local-mods] Pin the MCP child to the active session cwd", bridge_text)
+        self.assertIn("  cwd?: string;", bridge_text)
+        self.assertIn("    this.cwd = policy.cwd ?? process.cwd();", bridge_text)
+        self.assertIn("      cwd: this.cwd,", bridge_text)
+        self.assertIn("[pi-local-mods] An intentional close must not also schedule", bridge_text)
+        self.assertIn("if (transport) transport.onclose = undefined;", bridge_text)
+        self.assertIn("private reconnectPromise: Promise<void> | undefined;", bridge_text)
+        self.assertIn("if (this.reconnectPromise) return this.reconnectPromise;", bridge_text)
+        self.assertIn("this.reconnectPromise = reconnect;", bridge_text)
+        # Constructor arity is unchanged: old/new index and bridge files remain
+        # mutually compatible if an update is interrupted between replacements.
+        self.assertIn(
+            "  constructor(\n    binary: string,\n    extraEnv: Record<string, string> = {},",
+            bridge_text,
+        )
+        self.assertNodeChecks(index)
+        self.assertNodeChecks(bridge)
+
+        # Re-applying must be a no-op and must retain clean backups for future
+        # package upgrades/drift checks.
+        first_index = index_text
+        first_bridge = bridge_text
+        self.mod.patch_lean_ctx_session_cwd()
+        self.assertEqual(index.read_text(), first_index)
+        self.assertEqual(bridge.read_text(), first_bridge)
+        self.assertNotIn(
+            "[pi-local-mods]",
+            index.with_suffix(index.suffix + ".pi-local-mods.bak").read_text(),
+        )
+        self.assertNotIn(
+            "[pi-local-mods]",
+            bridge.with_suffix(bridge.suffix + ".pi-local-mods.bak").read_text(),
+        )
+
+    def test_lean_ctx_patch_rejects_drift_without_partial_write(self) -> None:
+        index_source = AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/index.ts"
+        bridge_source = AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/mcp-bridge.ts"
+        cases = [
+            (
+                "index-startup-anchor",
+                "index",
+                "[pi-lean-ctx] MCP bridge startup failed:",
+                "[pi-lean-ctx] changed startup wording:",
+            ),
+            (
+                "bridge-cwd-assignment-anchor",
+                "bridge",
+                "    this.binary = binary;\n    this.extraEnv = extraEnv;",
+                "    this.binary = binary;\n    // upstream drift\n    this.extraEnv = extraEnv;",
+            ),
+        ]
+
+        for name, target_name, old, new in cases:
+            with self.subTest(name=name):
+                package = self.root / name / "pi-lean-ctx"
+                index = package / "extensions/index.ts"
+                bridge = package / "extensions/mcp-bridge.ts"
+                index.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(index_source, index)
+                shutil.copy2(bridge_source, bridge)
+                target = index if target_name == "index" else bridge
+                original_target = target.read_text()
+                self.assertEqual(original_target.count(old), 1)
+                target.write_text(original_target.replace(old, new))
+                before_index = index.read_text()
+                before_bridge = bridge.read_text()
+
+                self.mod.LEAN_CTX_PACKAGE = package
+                self.mod.LEAN_CTX_INDEX = index
+                self.mod.LEAN_CTX_MCP_BRIDGE = bridge
+                with self.assertRaises(SystemExit):
+                    self.mod.patch_lean_ctx_session_cwd()
+
+                # Strict anchor validation happens before staged replacement, so
+                # neither member of the two-file patch may be partially updated.
+                self.assertEqual(index.read_text(), before_index)
+                self.assertEqual(bridge.read_text(), before_bridge)
+                self.assertFalse(list(index.parent.glob(".*.pi-local-mods.*.ts")))
+
+    def test_lean_ctx_patch_rolls_back_if_second_replace_fails(self) -> None:
+        package = self.root / "rollback" / "pi-lean-ctx"
+        index = package / "extensions/index.ts"
+        bridge = package / "extensions/mcp-bridge.ts"
+        index.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/index.ts",
+            index,
+        )
+        shutil.copy2(
+            AGENT_FIXTURE / "npm/node_modules/pi-lean-ctx/extensions/mcp-bridge.ts",
+            bridge,
+        )
+        before_index = index.read_text()
+        before_bridge = bridge.read_text()
+        self.mod.LEAN_CTX_PACKAGE = package
+        self.mod.LEAN_CTX_INDEX = index
+        self.mod.LEAN_CTX_MCP_BRIDGE = bridge
+
+        real_replace = self.mod.os.replace
+        replace_calls = 0
+
+        def fail_second_replace(source, destination):
+            nonlocal replace_calls
+            replace_calls += 1
+            if replace_calls == 2:
+                raise OSError("injected second replace failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(self.mod.os, "replace", side_effect=fail_second_replace):
+            with self.assertRaisesRegex(OSError, "injected second replace failure"):
+                self.mod.patch_lean_ctx_session_cwd()
+
+        self.assertEqual(index.read_text(), before_index)
+        self.assertEqual(bridge.read_text(), before_bridge)
+        self.assertFalse(list(index.parent.glob(".*.pi-local-mods.*.ts")))
 
     def test_bg_tasks_shortcut_patch_final_result(self) -> None:
         package = self.root / "agent/npm/node_modules/pi-patty-bg-tasks"

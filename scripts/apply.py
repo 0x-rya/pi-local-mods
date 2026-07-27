@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 HOME = Path.home()
@@ -32,6 +33,9 @@ TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
 BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
+LEAN_CTX_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-lean-ctx"
+LEAN_CTX_INDEX = LEAN_CTX_PACKAGE / "extensions/index.ts"
+LEAN_CTX_MCP_BRIDGE = LEAN_CTX_PACKAGE / "extensions/mcp-bridge.ts"
 QUOTA_DASHBOARD_SRC = ROOT / "extensions" / "quota-dashboard.ts"
 QUOTA_DASHBOARD_DST = PI_AGENT_DIR / "extensions" / "quota-dashboard.ts"
 
@@ -817,6 +821,8 @@ CLEAN_MARKERS = {
     "FOOTER": "renderMainStatusLine",
     "CUSTOM_EDITOR": "setTopBorderProvider",
     "TERMINAL": "Enable button-event mouse tracking",
+    "LEAN_CTX_INDEX": "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
+    "LEAN_CTX_MCP_BRIDGE": "[pi-local-mods] Pin the MCP child to the active session cwd",
 }
 
 
@@ -2048,6 +2054,366 @@ def patch_terminal() -> None:
     TERMINAL.write_text(text)
 
 
+def patch_lean_ctx_session_cwd() -> None:
+    """Bind pi-lean-ctx subprocesses to Pi's active session cwd.
+
+    Pi can resume a session whose persisted cwd differs from process.cwd(). The
+    upstream extension starts its MCP child during factory loading and lets the
+    child inherit process.cwd(), which can be Pi's installed package directory.
+    Starting from session_start and passing ctx.cwd to the MCP transport keeps
+    the lean-ctx path jail aligned with the active session. The same rule is
+    applied to wrapped Pi tools and one-shot lean-ctx commands.
+    """
+    if not LEAN_CTX_PACKAGE.exists():
+        return
+
+    backup(LEAN_CTX_INDEX, CLEAN_MARKERS["LEAN_CTX_INDEX"])
+    backup(LEAN_CTX_MCP_BRIDGE, CLEAN_MARKERS["LEAN_CTX_MCP_BRIDGE"])
+    # Always regenerate from clean sources. This makes re-applying a revised
+    # local patch deterministic instead of layering edits over an older patch.
+    index = clean_source(LEAN_CTX_INDEX, CLEAN_MARKERS["LEAN_CTX_INDEX"]).read_text()
+    bridge = clean_source(LEAN_CTX_MCP_BRIDGE, CLEAN_MARKERS["LEAN_CTX_MCP_BRIDGE"]).read_text()
+
+    def replace_required(text: str, old: str, new: str, label: str | None = None, expected: int = 1) -> str:
+        count = text.count(old)
+        if count != expected:
+            anchor = label or old.splitlines()[0][:80]
+            raise SystemExit(
+                f"Could not apply pi-lean-ctx session cwd patch ({anchor}): "
+                f"expected {expected} exact match(es), found {count}"
+            )
+        return text.replace(old, new)
+
+    index = replace_required(index,
+        '''function isMcpAdapterConfigured(): boolean {
+  const home = homedir();
+  const mcpConfigPaths = [
+    resolve(home, ".pi", "agent", "mcp.json"),
+    resolve(process.cwd(), ".pi", "mcp.json"),
+  ];''',
+        '''function isMcpAdapterConfigured(projectCwd = process.cwd()): boolean {
+  const home = homedir();
+  const mcpConfigPaths = [
+    resolve(home, ".pi", "agent", "mcp.json"),
+    resolve(projectCwd, ".pi", "mcp.json"),
+  ];''',
+    )
+    index = replace_required(index,
+        '''async function execLeanCtx(pi: ExtensionAPI, args: string[]) {
+  const bin = resolveBinary();
+  const result = await pi.exec(bin, args);''',
+        '''async function execLeanCtx(pi: ExtensionAPI, args: string[], cwd?: string) {
+  const bin = resolveBinary();
+  const result = await pi.exec(bin, args, cwd ? { cwd } : undefined);''',
+    )
+    index = replace_required(index,
+        '''  const baseBashTool = createBashToolDefinition(process.cwd(), {
+    spawnHook: ({ command, cwd, env }) => {
+      const bin = resolveBinary();
+      return {
+        command: `${shellQuote(bin)} -c ${shellQuote(command)}`,
+        cwd,
+        env: leanCtxEnv(env),
+      };
+    },
+  });
+
+  const rawBash = createBashToolDefinition(process.cwd());''',
+        '''  const createCompressedBashTool = (cwd: string) => createBashToolDefinition(cwd, {
+    spawnHook: ({ command, cwd, env }) => {
+      const bin = resolveBinary();
+      return {
+        command: `${shellQuote(bin)} -c ${shellQuote(command)}`,
+        cwd,
+        env: leanCtxEnv(env),
+      };
+    },
+  });
+
+  // Rendering does not execute the definition; execution below creates a
+  // cwd-bound definition from ctx.cwd for every call.
+  const bashRendererTool = createCompressedBashTool(".");''',
+    )
+    index = replace_required(index,"return baseBashTool.renderResult", "return bashRendererTool.renderResult")
+    index = replace_required(index,"? baseBashTool.renderResult(", "? bashRendererTool.renderResult(")
+    index = replace_required(index,
+        "      const tool = isRaw ? rawBash : baseBashTool;",
+        "      const tool = isRaw ? createBashToolDefinition(ctx.cwd) : createCompressedBashTool(ctx.cwd);",
+    )
+    index = replace_required(index,
+        "  const nativeReadTool = createReadToolDefinition(process.cwd());",
+        "  const nativeReadTool = createReadToolDefinition(\".\");",
+    )
+    index = replace_required(index,
+        "        return nativeReadTool.execute(_toolCallId, { ...params, path: absolutePath }, signal, onUpdate, ctx);",
+        "        return createReadToolDefinition(ctx.cwd).execute(_toolCallId, { ...params, path: absolutePath }, signal, onUpdate, ctx);",
+    )
+    index = replace_required(
+        index,
+        "await execLeanCtx(pi, args);",
+        "await execLeanCtx(pi, args, ctx.cwd);",
+        "ctx_read CLI fallbacks",
+        expected=2,
+    )
+    index = replace_required(index,
+        'await execLeanCtx(pi, ["ls", absolutePath]);',
+        'await execLeanCtx(pi, ["ls", absolutePath], ctx.cwd);',
+    )
+    index = replace_required(index,
+        'await execLeanCtx(pi, ["find", params.pattern, absolutePath]);',
+        'await execLeanCtx(pi, ["find", params.pattern, absolutePath], ctx.cwd);',
+    )
+    index = replace_required(index,
+        'const result = await pi.exec(bin, ["-c", ...searchArgs]);',
+        'const result = await pi.exec(bin, ["-c", ...searchArgs], { cwd: ctx.cwd });',
+    )
+    index = replace_required(index,
+        '''    async execute(_toolCallId, params) {
+      const output = await execLeanCtx(pi, params.args);''',
+        '''    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const output = await execLeanCtx(pi, params.args, ctx.cwd);''',
+    )
+    index = replace_required(index,
+        "  const nativeLsTool = createLsToolDefinition(process.cwd());\n  const nativeFindTool = createFindToolDefinition(process.cwd());\n  const nativeGrepTool = createGrepToolDefinition(process.cwd());",
+        "  const nativeLsTool = createLsToolDefinition(\".\");\n  const nativeFindTool = createFindToolDefinition(\".\");\n  const nativeGrepTool = createGrepToolDefinition(\".\");",
+    )
+    index = replace_required(index,
+        '''  const adapterConfigured = isMcpAdapterConfigured();
+  // An explicit opt-in to the embedded bridge wins over mcp.json detection (#361).
+  // A `lean-ctx` entry in ~/.pi/agent/mcp.json does NOT prove that pi-mcp-adapter
+  // is actually serving it — pi has no native MCP support, and `lean-ctx init
+  // --agent pi` writes that entry by default — so it must not silently disable the
+  // bridge a user explicitly requested via LEAN_CTX_PI_ENABLE_MCP=1 / enableMcp.
+  mcpBridge = enableMcpBridge
+    ? new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {
+        disabledTools: PI_CONFIG.disabledTools,
+        toolPrefix: PI_CONFIG.toolPrefix,
+        localTools: localToolNames,
+      })
+    : null;
+
+  if (mcpBridge) {
+    pi.on("session_shutdown", async () => {
+      await mcpBridge?.shutdown();
+    });''',
+        '''  let adapterConfigured = isMcpAdapterConfigured();
+  // An explicit opt-in to the embedded bridge wins over mcp.json detection (#361).
+  // A `lean-ctx` entry in ~/.pi/agent/mcp.json does NOT prove that pi-mcp-adapter
+  // is actually serving it — pi has no native MCP support, and `lean-ctx init
+  // --agent pi` writes that entry by default — so it must not silently disable the
+  // bridge a user explicitly requested via LEAN_CTX_PI_ENABLE_MCP=1 / enableMcp.
+  if (enableMcpBridge) {
+    // [pi-local-mods] Bind all session-scoped work to ctx.cwd. Pi may resume a
+    // session from a different directory than process.cwd(), so starting the
+    // long-lived child during factory loading gives lean-ctx the wrong path jail.
+    pi.on("session_start", async (_event, ctx) => {
+      // A runner normally emits session_start once. Keep this idempotent so an
+      // accidental duplicate cannot replace the bridge captured by MCP tools.
+      if (mcpBridge) return;
+      adapterConfigured = isMcpAdapterConfigured(ctx.cwd);
+      mcpBridge = new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {
+        cwd: ctx.cwd,
+        disabledTools: PI_CONFIG.disabledTools,
+        toolPrefix: PI_CONFIG.toolPrefix,
+        localTools: localToolNames,
+      });
+      await mcpBridge.start(pi);
+    });
+
+    pi.on("session_shutdown", async () => {
+      const bridge = mcpBridge;
+      mcpBridge = null;
+      await bridge?.shutdown();
+    });''',
+    )
+    index = replace_required(index,
+        '''
+    try {
+      await mcpBridge.start(pi);
+    } catch (err) {
+      console.error(`[pi-lean-ctx] MCP bridge startup failed: ${err}`);
+    }
+  }
+''',
+        '''
+  }
+''',
+        "remove factory-time MCP startup",
+    )
+    index = replace_required(
+        index,
+        '''  // Declared up-front so the ctx_read handler (registered below) can route
+  // through the embedded bridge once it connects. Assigned after the tools are
+  // registered (the bridge is started at the end of this function).''',
+        '''  // Declared up-front so the ctx_read handler (registered below) can route
+  // through the embedded bridge once session_start connects it.''',
+        "update bridge lifecycle comment",
+    )
+
+    required_index = [
+        "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
+        "function isMcpAdapterConfigured(projectCwd = process.cwd())",
+        "pi.exec(bin, args, cwd ? { cwd } : undefined)",
+        "createCompressedBashTool(ctx.cwd)",
+        "createReadToolDefinition(ctx.cwd).execute",
+        "new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {\n        cwd: ctx.cwd,",
+    ]
+    missing_index = [marker for marker in required_index if marker not in index]
+    forbidden_index = [
+        "mcpBridge = enableMcpBridge\n    ? new McpBridge",
+        "const rawBash = createBashToolDefinition(process.cwd())",
+        "const baseBashTool = createBashToolDefinition(process.cwd()",
+        "const nativeReadTool = createReadToolDefinition(process.cwd())",
+        "const nativeLsTool = createLsToolDefinition(process.cwd())",
+    ]
+    remaining_index = [marker for marker in forbidden_index if marker in index]
+    if missing_index or remaining_index:
+        raise SystemExit(
+            "Could not apply pi-lean-ctx session cwd patch to index.ts: "
+            f"missing={missing_index}, remaining={remaining_index}"
+        )
+    bridge = replace_required(bridge,
+        '''  /** Optional prefix applied to the Pi-facing tool name (not the MCP call). */
+  toolPrefix?: string;''',
+        '''  /** Active Pi session cwd used as the MCP server root and path jail. */
+  cwd?: string;
+  /** Optional prefix applied to the Pi-facing tool name (not the MCP call). */
+  toolPrefix?: string;''',
+    )
+    bridge = replace_required(bridge,
+        '''  private binary: string;
+  private extraEnv: Record<string, string>;''',
+        '''  private binary: string;
+  private cwd: string;
+  private extraEnv: Record<string, string>;''',
+    )
+    bridge = replace_required(bridge,
+        '''    this.binary = binary;
+    this.extraEnv = extraEnv;''',
+        '''    this.binary = binary;
+    this.cwd = policy.cwd ?? process.cwd();
+    this.extraEnv = extraEnv;''',
+    )
+    bridge = replace_required(
+        bridge,
+        '''  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private shuttingDown = false;''',
+        '''  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectPromise: Promise<void> | undefined;
+  private shuttingDown = false;''',
+        "add single-flight reconnect state",
+    )
+    bridge = replace_required(bridge,
+        '''      env: { ...this.extraEnv, ...process.env, LEAN_CTX_COMPRESS: "1" },
+      stderr: "pipe",''',
+        '''      env: { ...this.extraEnv, ...process.env, LEAN_CTX_COMPRESS: "1" },
+      // [pi-local-mods] Pin the MCP child to the active session cwd so the
+      // server's project root and path jail match Pi's ctx.cwd.
+      cwd: this.cwd,
+      stderr: "pipe",''',
+    )
+    bridge = replace_required(
+        bridge,
+        '''  private async forceReconnect(): Promise<void> {
+    if (this.shuttingDown) return;
+    this.connected = false;
+    try {
+      await this.client?.close();
+    } catch {
+      // best-effort cleanup
+    }
+    this.client = null;
+    this.transport = null;
+    await this.connect();
+  }''',
+        '''  private async forceReconnect(): Promise<void> {
+    if (this.shuttingDown) return;
+    if (this.reconnectPromise) return this.reconnectPromise;
+
+    const reconnect = (async () => {
+      this.connected = false;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+      }
+
+      // [pi-local-mods] An intentional close must not also schedule the normal
+      // delayed reconnect. Detach the old transport before closing it, otherwise
+      // its onclose callback can race the immediate reconnect and leak a child.
+      const client = this.client;
+      const transport = this.transport;
+      this.client = null;
+      this.transport = null;
+      if (transport) transport.onclose = undefined;
+      try {
+        await client?.close();
+      } catch {
+        // best-effort cleanup
+      }
+      await this.connect();
+    })();
+
+    this.reconnectPromise = reconnect;
+    try {
+      await reconnect;
+    } finally {
+      if (this.reconnectPromise === reconnect) this.reconnectPromise = undefined;
+    }
+  }''',
+        "suppress delayed reconnect during intentional close",
+    )
+    required_bridge = [
+        "[pi-local-mods] Pin the MCP child to the active session cwd",
+        "  cwd?: string;",
+        "    this.cwd = policy.cwd ?? process.cwd();",
+        "      cwd: this.cwd,",
+        "[pi-local-mods] An intentional close must not also schedule",
+        "if (transport) transport.onclose = undefined;",
+        "if (this.reconnectPromise) return this.reconnectPromise;",
+        "this.reconnectPromise = reconnect;",
+    ]
+    missing_bridge = [marker for marker in required_bridge if marker not in bridge]
+    if missing_bridge:
+        raise SystemExit(
+            "Could not apply pi-lean-ctx session cwd patch to mcp-bridge.ts: "
+            f"missing={missing_bridge}"
+        )
+    # Stage and syntax-check both outputs before replacing either live file.
+    # The constructor call remains backward-compatible across the two versions,
+    # and rollback restores both originals if either replace fails.
+    # Install the backward-compatible bridge first. A hard process crash between
+    # replacements therefore leaves old index + new bridge (old behavior), never
+    # new index + old bridge (which would ignore the supplied session cwd).
+    staged = [
+        (LEAN_CTX_MCP_BRIDGE, bridge),
+        (LEAN_CTX_INDEX, index),
+    ]
+    originals = {path: path.read_text() for path, _text in staged}
+    temp_paths: list[Path] = []
+    try:
+        for path, text in staged:
+            fd, temp_name = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f".{path.stem}.pi-local-mods.",
+                suffix=path.suffix,
+            )
+            os.close(fd)
+            temp = Path(temp_name)
+            temp_paths.append(temp)
+            temp.write_text(text)
+            shutil.copymode(path, temp)
+            subprocess.run(["node", "--check", str(temp)], check=True)
+        for (path, _text), temp in zip(staged, temp_paths):
+            os.replace(temp, path)
+    except BaseException:
+        for path, original in originals.items():
+            path.write_text(original)
+        raise
+    finally:
+        for temp in temp_paths:
+            temp.unlink(missing_ok=True)
+
+
 def patch_bg_tasks_shortcuts() -> None:
     if not BG_TASKS_PACKAGE.exists():
         return
@@ -2109,7 +2475,10 @@ def install_quota_dashboard() -> None:
 
 
 def verify() -> None:
-    for path in (INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL):
+    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL]
+    if LEAN_CTX_PACKAGE.exists():
+        paths.extend([LEAN_CTX_INDEX, LEAN_CTX_MCP_BRIDGE])
+    for path in paths:
         subprocess.run(["node", "--check", str(path)], check=True)
 
 
@@ -2120,6 +2489,7 @@ def main() -> None:
     patch_footer_component()
     patch_custom_editor()
     patch_terminal()
+    patch_lean_ctx_session_cwd()
     patch_bg_tasks_shortcuts()
     install_theme()
     install_quota_dashboard()

@@ -63,6 +63,39 @@ def main() -> int:
         else:
             print(f"ok   {fn_name}  ({live.name})")
 
+    # pi-lean-ctx is a two-file patch and must be validated atomically against
+    # the currently installed package, including TypeScript syntax.
+    live_lean_package = apply.LEAN_CTX_PACKAGE
+    if live_lean_package.exists():
+        lean_package = tmp / "pi-lean-ctx"
+        lean_extensions = lean_package / "extensions"
+        lean_extensions.mkdir(parents=True, exist_ok=True)
+        lean_targets = [
+            ("LEAN_CTX_INDEX", "index.ts"),
+            ("LEAN_CTX_MCP_BRIDGE", "mcp-bridge.ts"),
+        ]
+        try:
+            for attr, filename in lean_targets:
+                live = getattr(apply, attr)
+                src = apply.clean_source(live, apply.CLEAN_MARKERS[attr])
+                dest = lean_extensions / filename
+                shutil.copy2(src, dest)
+                setattr(apply, attr, dest)
+            apply.LEAN_CTX_PACKAGE = lean_package
+            apply.patch_lean_ctx_session_cwd()
+            for attr, filename in lean_targets:
+                dest = getattr(apply, attr)
+                result = subprocess.run(["node", "--check", str(dest)], capture_output=True, text=True)
+                if result.returncode != 0:
+                    failures.append(
+                        f"patch_lean_ctx_session_cwd: node --check failed for {filename}\n"
+                        f"{result.stderr.strip()}"
+                    )
+                else:
+                    print(f"ok   patch_lean_ctx_session_cwd  ({filename})")
+        except SystemExit as e:
+            failures.append(f"patch_lean_ctx_session_cwd: PATCH FAILED -> {e}")
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
