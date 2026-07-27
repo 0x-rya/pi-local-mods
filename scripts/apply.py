@@ -30,6 +30,7 @@ CLIPBOARD_IMAGE = PI_PACKAGE / "dist/utils/clipboard-image.js"
 FOOTER = PI_PACKAGE / "dist/modes/interactive/components/footer.js"
 CUSTOM_EDITOR = PI_PACKAGE / "dist/modes/interactive/components/custom-editor.js"
 TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
+TUI_JS = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
 BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
@@ -821,6 +822,7 @@ CLEAN_MARKERS = {
     "FOOTER": "renderMainStatusLine",
     "CUSTOM_EDITOR": "setTopBorderProvider",
     "TERMINAL": "Enable button-event mouse tracking",
+    "TUI_JS": "[pi-local-mods] overlay full-redraw on appended content",
     "LEAN_CTX_INDEX": "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
     "LEAN_CTX_MCP_BRIDGE": "[pi-local-mods] Pin the MCP child to the active session cwd",
 }
@@ -2108,6 +2110,42 @@ def patch_terminal() -> None:
     TERMINAL.write_text(text)
 
 
+def patch_tui_overlay_scroll() -> None:
+    """Force a clean full repaint when an overlay is visible and content is appended.
+
+    pi-tui's differential writer only repaints changed lines and lets the terminal
+    scroll for appended content. When an overlay (e.g. the pi-subagents fleet
+    inspector) is open and the chat behind it streams lines in one frame, the
+    terminal scrolls mid-write and leaves the rows above `firstChanged` shifted
+    but unpainted, so the screen-fixed overlay drifts and stale overlay frames
+    persist (the "duplicate rows in the view-subagents panel" rendering bug).
+    Re-deriving the whole frame from the in-memory buffer also rebuilds scrollback,
+    so no chat history is lost.
+    """
+    backup(TUI_JS, CLEAN_MARKERS["TUI_JS"])
+    text = TUI_JS.read_text()
+    marker = CLEAN_MARKERS["TUI_JS"]
+    if marker in text:
+        TUI_JS.write_text(text)
+        return
+    needle = "        const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;\n"
+    guard = (
+        needle
+        + "        // " + marker + "\n"
+        + "        // Overlays are screen-fixed; appending content scrolls the terminal\n"
+        + "        // mid-write and misaligns the overlay, so rebuild the frame cleanly.\n"
+        + "        if (appendedLines && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {\n"
+        + "            logRedraw(\"overlay active + appended content\");\n"
+        + "            fullRender(true);\n"
+        + "            return;\n"
+        + "        }\n"
+    )
+    if needle not in text:
+        raise SystemExit("Could not anchor TUI overlay-scroll patch (appendStart line not found)")
+    text = text.replace(needle, guard, 1)
+    TUI_JS.write_text(text)
+
+
 def patch_lean_ctx_session_cwd() -> None:
     """Bind pi-lean-ctx subprocesses to Pi's active session cwd.
 
@@ -2529,7 +2567,7 @@ def install_quota_dashboard() -> None:
 
 
 def verify() -> None:
-    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL]
+    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL, TUI_JS]
     if LEAN_CTX_PACKAGE.exists():
         paths.extend([LEAN_CTX_INDEX, LEAN_CTX_MCP_BRIDGE])
     for path in paths:
@@ -2543,6 +2581,7 @@ def main() -> None:
     patch_footer_component()
     patch_custom_editor()
     patch_terminal()
+    patch_tui_overlay_scroll()
     patch_lean_ctx_session_cwd()
     patch_bg_tasks_shortcuts()
     install_theme()

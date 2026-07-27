@@ -34,6 +34,7 @@ TARGETS = [
     ("CUSTOM_EDITOR", "pi/dist/modes/interactive/components/custom-editor.js"),
     ("CLIPBOARD_IMAGE", "pi/dist/utils/clipboard-image.js"),
     ("TERMINAL", "pi/node_modules/@earendil-works/pi-tui/dist/terminal.js"),
+    ("TUI_JS", "pi/node_modules/@earendil-works/pi-tui/dist/tui.js"),
 ]
 
 

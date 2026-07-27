@@ -442,6 +442,47 @@ for (const update of widgetUpdates) {{
         self.assertIn("Enable button-event mouse tracking with SGR encoding", text)
         self.assertNodeChecks(terminal)
 
+    def test_tui_overlay_scroll_patch_final_result(self) -> None:
+        source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
+        source_text = source.read_text()
+        self.assertNotIn("[pi-local-mods] overlay full-redraw", source_text)
+        self.assertIn(
+            "const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;",
+            source_text,
+        )
+        tui = self.copy_fixture(
+            source,
+            "pi/node_modules/@earendil-works/pi-tui/dist/tui.js",
+        )
+        self.mod.TUI_JS = tui
+
+        self.mod.patch_tui_overlay_scroll()
+        text = tui.read_text()
+
+        self.assertIn("[pi-local-mods] overlay full-redraw on appended content", text)
+        self.assertEqual(text.count("[pi-local-mods] overlay full-redraw on appended content"), 1)
+        self.assertIn(
+            "if (appendedLines && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {",
+            text,
+        )
+        self.assertIn('logRedraw("overlay active + appended content");', text)
+        # The guard must sit between the appendStart line and the "No changes"
+        # early return so it short-circuits the differential writer.
+        self.assertLess(
+            text.index("const appendStart = appendedLines"),
+            text.index("[pi-local-mods] overlay full-redraw on appended content"),
+        )
+        self.assertLess(
+            text.index("[pi-local-mods] overlay full-redraw on appended content"),
+            text.index("// No changes - but still need to update hardware cursor position if it moved"),
+        )
+        self.assertNodeChecks(tui)
+
+        # Re-applying must be a no-op (idempotent) and must not duplicate the guard.
+        first_apply = tui.read_bytes()
+        self.mod.patch_tui_overlay_scroll()
+        self.assertEqual(tui.read_bytes(), first_apply)
+
     def test_footer_patch_final_result(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/components/footer.js"
         self.assertNotIn("renderMainStatusLine", source.read_text())
