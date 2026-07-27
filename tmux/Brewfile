@@ -1,0 +1,3 @@
+brew "tmux"
+brew "cbonsai"
+brew "git"

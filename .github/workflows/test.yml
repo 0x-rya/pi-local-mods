@@ -18,8 +18,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "lts/*"
-      - name: Patch tests (+ node --check on patched output)
-        run: python3 -m unittest scripts.test_apply -v
+      - name: Pi patch and tmux setup tests
+        run: python3 -m unittest scripts.test_apply scripts.test_tmux -v
 
   # Install the LATEST published Pi and confirm the patches still fit it.
   # Required: an upstream Pi release that breaks a patch fails the build and

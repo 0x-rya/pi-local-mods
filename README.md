@@ -1,15 +1,15 @@
 # pi-local-mods
 
-Personal local patches for the globally installed Pi coding agent.
+Reproducible local setup for the Pi coding agent and tmux.
 
-These are intentionally **not** implemented as a Pi extension because the useful parts patch Pi internals that are not currently exposed to extensions:
+The Pi changes are intentionally **not** implemented as a Pi extension because the useful parts patch Pi internals that are not currently exposed to extensions:
 
 - transcript mouse/trackpad scrolling
 - app-owned transcript selection + copy
 - scroll anchoring while streaming / expanding tool output
 - custom `codex-dark` theme
 
-## Apply
+## Apply Pi patches
 
 ```bash
 ./apply.sh
@@ -42,7 +42,7 @@ Restart Pi after applying.
 The suite applies every patch to committed fixtures (snapshots of clean Pi source) and `node --check`s the result, so it catches both applicability and JS-syntax regressions without touching the live install:
 
 ```bash
-python3 -m unittest scripts.test_apply
+python3 -m unittest scripts.test_apply scripts.test_tmux
 ```
 
 CI (`.github/workflows/test.yml`) runs this on every push/PR. A second `drift` job installs the **latest published Pi** and smoke-tests the patches against it on every push/PR, so an upstream Pi release that breaks a patch fails the build and must be fixed before merging.
@@ -68,6 +68,46 @@ The hook lives in your shell profile, not in Pi's files, so it survives every up
 - `python3 scripts/refresh_fixtures.py` — after confirming patches work on a new Pi, refresh the snapshots and bump `VERSION`, then commit.
 
 > `./apply.sh --upgrade-pi` still exists as a one-shot "install/upgrade Pi + patch" convenience (e.g. a fresh machine), but day-to-day updates go through `pi update` + the hook above.
+
+## Tmux setup
+
+The canonical tmux configuration lives in [`tmux/`](tmux/):
+
+- `tmux.conf` and the scripts/cheatsheet it invokes
+- the zsh auto-attach/workspace fragment
+- a Homebrew dependency manifest
+- exact commits for TPM and all configured plugins
+- an idempotent installer with backups
+
+Apply the configuration and pinned plugins:
+
+```bash
+./tmux/apply.sh
+```
+
+On a fresh Mac, install dependencies and enable automatic tmux attachment in zsh too:
+
+```bash
+./tmux/apply.sh --install-deps --enable-auto-attach
+```
+
+Useful options:
+
+- `--install-deps` — run `brew bundle` for tmux, cbonsai, and git
+- `--enable-auto-attach` — replace the legacy inline block, if present, with a managed `~/.zshrc` source block
+- `--skip-plugins` — install only config/scripts (used by offline tests)
+
+Changed live files are backed up under `~/.config/tmux/backups/`; a changed `.zshrc` is backed up beside the original. Managed-file symlinks are refused rather than replaced. Plugins are staged and commit-verified before publication. The installer intentionally does not delete unlisted helper/plugin directories, which may be user-owned; remove obsolete entries manually.
+
+The repository does not commit or copy TPM checkouts, tmux-resurrect snapshots, pane contents, or other runtime state.
+
+The setup targets macOS (`pbcopy`) and uses Ghostty's Kitty/extended-key support. To preserve the configured Shift+Enter behavior, keep this in Ghostty's config:
+
+```ini
+keybind = shift+enter=text:\n
+```
+
+After applying, either reload with `prefix + r` or restart tmux. Start a new shell after enabling auto-attach.
 
 ## Selection UX
 

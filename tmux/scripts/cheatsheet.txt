@@ -1,0 +1,57 @@
+  tmux cheatsheet  —  prefix = Ctrl-a   (q to close)
+
+  ┌─ panes ─────────────────────────────────────────────────────────────┐
+  │  prefix |          split right          (\ also works)              │
+  │  prefix -          split down                                       │
+  │  Alt + h/j/k/l     move between panes (no prefix)                   │
+  │  prefix h/j/k/l    move between panes                               │
+  │  prefix H/J/K/L    resize  (repeatable)                             │
+  │  prefix z          zoom / unzoom current pane                       │
+  │  prefix ;          last pane                                        │
+  │  prefix x          kill pane (asks first)                           │
+  │  prefix =          tile layout                                      │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ windows ───────────────────────────────────────────────────────────┐
+  │  prefix c          new window  (in current pane's directory)        │
+  │  Shift + Left/Right   prev / next window  (no prefix)               │
+  │  Alt + 1..9        jump to window N       (no prefix)               │
+  │  prefix Tab        last window                                      │
+  │  prefix ,          rename window                                    │
+  │  prefix X          kill window (asks first)                         │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ workspaces (tmux sessions) ────────────────────────────────────────┐
+  │  prefix s          workspace picker                                 │
+  │  prefix n          create and switch to a new workspace             │
+  │  prefix m          send window (source must have 2+ windows)         │
+  │  prefix Q          choose a workspace to delete (asks first)        │
+  │  prefix $          rename current workspace                         │
+  │  prefix w          window picker                                    │
+  │  prefix d          detach                                           │
+  │  prefix D          choose a client to detach                        │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ copy / paste (vi-mode, copies to macOS clipboard) ─────────────────┐
+  │  prefix Enter      enter copy mode                                  │
+  │  v / V             start char- / line-selection                     │
+  │  Ctrl-v            toggle block selection                           │
+  │  y or Enter        copy selection (→ pbcopy)                        │
+  │  prefix p          paste                                            │
+  │  prefix P          choose paste buffer                              │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ side panel  (bonsai + git log) ────────────────────────────────────┐
+  │  prefix g  /  Alt-g    toggle right side panel                      │
+  │  prefix G              add a repo's git log to the panel            │
+  │  prefix R              reset the panel (clear added repos)          │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ misc ──────────────────────────────────────────────────────────────┐
+  │  prefix r          reload config                                    │
+  │  prefix ?          this cheatsheet                                  │
+  │  prefix I          install plugins (TPM)                            │
+  │  prefix U          update plugins (TPM)                             │
+  │  prefix Ctrl-s     resurrect: save session   (resurrect plugin)     │
+  │  prefix Ctrl-r     resurrect: restore session                       │
+  └─────────────────────────────────────────────────────────────────────┘
