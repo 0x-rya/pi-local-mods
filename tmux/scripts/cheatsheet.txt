@@ -41,12 +41,6 @@
   │  prefix P          choose paste buffer                              │
   └─────────────────────────────────────────────────────────────────────┘
 
-  ┌─ side panel  (bonsai + git log) ────────────────────────────────────┐
-  │  prefix g  /  Alt-g    toggle right side panel                      │
-  │  prefix G              add a repo's git log to the panel            │
-  │  prefix R              reset the panel (clear added repos)          │
-  └─────────────────────────────────────────────────────────────────────┘
-
   ┌─ misc ──────────────────────────────────────────────────────────────┐
   │  prefix r          reload config                                    │
   │  prefix ?          this cheatsheet                                  │
