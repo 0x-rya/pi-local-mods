@@ -2111,31 +2111,27 @@ def patch_terminal() -> None:
 
 
 def patch_tui_overlay_scroll() -> None:
-    """Force a clean full repaint when an overlay is visible and content is appended.
+    """Force a clean full repaint when a visible overlay participates in a changed frame.
 
-    pi-tui's differential writer only repaints changed lines and lets the terminal
-    scroll for appended content. When an overlay (e.g. the pi-subagents fleet
-    inspector) is open and the chat behind it streams lines in one frame, the
-    terminal scrolls mid-write and leaves the rows above `firstChanged` shifted
-    but unpainted, so the screen-fixed overlay drifts and stale overlay frames
-    persist (the "duplicate rows in the view-subagents panel" rendering bug).
-    Re-deriving the whole frame from the in-memory buffer also rebuilds scrollback,
-    so no chat history is lost.
+    pi-tui's differential writer only repaints changed lines in the composited
+    frame. Screen-fixed overlays (e.g. the pi-subagents fleet inspector) can be
+    corrupted both when chat content behind them appends and when the overlay
+    panel itself changes. In either case, repainting only the changed slice can
+    leave stale overlay rows/cells behind because the terminal state is not the
+    same as the composited in-memory frame. Re-deriving the whole frame from the
+    in-memory buffer also rebuilds scrollback, so no chat history is lost.
     """
-    backup(TUI_JS, CLEAN_MARKERS["TUI_JS"])
-    text = TUI_JS.read_text()
     marker = CLEAN_MARKERS["TUI_JS"]
-    if marker in text:
-        TUI_JS.write_text(text)
-        return
+    backup(TUI_JS, marker)
+    text = clean_source(TUI_JS, marker).read_text()
     needle = "        const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;\n"
     guard = (
         needle
         + "        // " + marker + "\n"
-        + "        // Overlays are screen-fixed; appending content scrolls the terminal\n"
-        + "        // mid-write and misaligns the overlay, so rebuild the frame cleanly.\n"
-        + "        if (appendedLines && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {\n"
-        + "            logRedraw(\"overlay active + appended content\");\n"
+        + "        // Overlays are screen-fixed; any changed composited overlay frame\n"
+        + "        // can leave stale rows/cells behind under the differential writer.\n"
+        + "        if (firstChanged !== -1 && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {\n"
+        + "            logRedraw(\"overlay active + changed frame\");\n"
         + "            fullRender(true);\n"
         + "            return;\n"
         + "        }\n"

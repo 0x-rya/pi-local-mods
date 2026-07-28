@@ -462,10 +462,10 @@ for (const update of widgetUpdates) {{
         self.assertIn("[pi-local-mods] overlay full-redraw on appended content", text)
         self.assertEqual(text.count("[pi-local-mods] overlay full-redraw on appended content"), 1)
         self.assertIn(
-            "if (appendedLines && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {",
+            "if (firstChanged !== -1 && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {",
             text,
         )
-        self.assertIn('logRedraw("overlay active + appended content");', text)
+        self.assertIn('logRedraw("overlay active + changed frame");', text)
         # The guard must sit between the appendStart line and the "No changes"
         # early return so it short-circuits the differential writer.
         self.assertLess(
