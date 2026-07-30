@@ -1683,10 +1683,31 @@ def patch_interactive() -> None:
         '        }\n'
         '    }'
     )
-    if set_tools_expanded_anchored not in text:
-        if set_tools_expanded_native not in text:
+    # Pi 0.83 replaced the final requestRender() with a visible status message.
+    # Keep that upstream behavior while applying the same scroll anchoring.
+    set_tools_expanded_native_with_status = set_tools_expanded_native.replace(
+        '        this.ui.requestRender();\n',
+        '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);\n',
+    )
+    set_tools_expanded_anchored_with_status = set_tools_expanded_anchored.replace(
+        '            this.ui.requestRender();\n        }\n    }',
+        '            this.ui.requestRender();\n        }\n'
+        '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);\n'
+        '    }',
+    )
+    if set_tools_expanded_anchored_with_status not in text:
+        if set_tools_expanded_anchored in text:
+            # Migrate a previously patched 0.83 install that was produced before
+            # the upstream status-message variant was recognized.
+            clean_interactive = clean_source(INTERACTIVE, CLEAN_MARKERS["INTERACTIVE"]).read_text()
+            if set_tools_expanded_native_with_status in clean_interactive:
+                text = text.replace(set_tools_expanded_anchored, set_tools_expanded_anchored_with_status, 1)
+        elif set_tools_expanded_native_with_status in text:
+            text = text.replace(set_tools_expanded_native_with_status, set_tools_expanded_anchored_with_status, 1)
+        elif set_tools_expanded_native in text:
+            text = text.replace(set_tools_expanded_native, set_tools_expanded_anchored, 1)
+        else:
             raise SystemExit("Could not find native setToolsExpanded to anchor ctrl+o scroll position")
-        text = text.replace(set_tools_expanded_native, set_tools_expanded_anchored, 1)
     # Expose handleHotkeysCommand to extension shortcut handlers so a shortcut
     # (e.g. Ctrl+?) can render the keyboard-shortcuts panel directly. Without
     # this, sendUserMessage("/hotkeys") goes to the model instead of the command.
@@ -2187,14 +2208,6 @@ def patch_lean_ctx_session_cwd() -> None:
   ];''',
     )
     index = replace_required(index,
-        '''async function execLeanCtx(pi: ExtensionAPI, args: string[]) {
-  const bin = resolveBinary();
-  const result = await pi.exec(bin, args);''',
-        '''async function execLeanCtx(pi: ExtensionAPI, args: string[], cwd?: string) {
-  const bin = resolveBinary();
-  const result = await pi.exec(bin, args, cwd ? { cwd } : undefined);''',
-    )
-    index = replace_required(index,
         '''  const baseBashTool = createBashToolDefinition(process.cwd(), {
     spawnHook: ({ command, cwd, env }) => {
       const bin = resolveBinary();
@@ -2238,28 +2251,28 @@ def patch_lean_ctx_session_cwd() -> None:
     )
     index = replace_required(
         index,
-        "await execLeanCtx(pi, args);",
-        "await execLeanCtx(pi, args, ctx.cwd);",
+        "await execLeanCtx(pi, args, { signal });",
+        "await execLeanCtx(pi, args, { signal, cwd: ctx.cwd });",
         "ctx_read CLI fallbacks",
         expected=2,
     )
     index = replace_required(index,
-        'await execLeanCtx(pi, ["ls", absolutePath]);',
-        'await execLeanCtx(pi, ["ls", absolutePath], ctx.cwd);',
+        'await execLeanCtx(pi, ["ls", absolutePath], { signal });',
+        'await execLeanCtx(pi, ["ls", absolutePath], { signal, cwd: ctx.cwd });',
     )
     index = replace_required(index,
-        'await execLeanCtx(pi, ["find", params.pattern, absolutePath]);',
-        'await execLeanCtx(pi, ["find", params.pattern, absolutePath], ctx.cwd);',
+        'await execLeanCtx(pi, ["find", params.pattern, absolutePath], { signal });',
+        'await execLeanCtx(pi, ["find", params.pattern, absolutePath], { signal, cwd: ctx.cwd });',
     )
     index = replace_required(index,
-        'const result = await pi.exec(bin, ["-c", ...searchArgs]);',
-        'const result = await pi.exec(bin, ["-c", ...searchArgs], { cwd: ctx.cwd });',
+        'const result = await pi.exec(bin, ["-c", ...searchArgs], { signal });',
+        'const result = await pi.exec(bin, ["-c", ...searchArgs], { signal, cwd: ctx.cwd });',
     )
     index = replace_required(index,
-        '''    async execute(_toolCallId, params) {
-      const output = await execLeanCtx(pi, params.args);''',
-        '''    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const output = await execLeanCtx(pi, params.args, ctx.cwd);''',
+        '''    async execute(_toolCallId, params, signal) {
+      const output = await execLeanCtx(pi, params.args, { signal });''',
+        '''    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const output = await execLeanCtx(pi, params.args, { signal, cwd: ctx.cwd });''',
     )
     index = replace_required(index,
         "  const nativeLsTool = createLsToolDefinition(process.cwd());\n  const nativeFindTool = createFindToolDefinition(process.cwd());\n  const nativeGrepTool = createGrepToolDefinition(process.cwd());",
@@ -2305,7 +2318,10 @@ def patch_lean_ctx_session_cwd() -> None:
         toolPrefix: PI_CONFIG.toolPrefix,
         localTools: localToolNames,
       });
-      await mcpBridge.start(pi);
+      // Non-blocking: do not delay session startup on the MCP child connecting.
+      void mcpBridge.start(pi).catch((err: unknown) => {
+        console.error(`[pi-lean-ctx] MCP bridge startup failed: ${err}`);
+      });
     });
 
     pi.on("session_shutdown", async () => {
@@ -2316,11 +2332,9 @@ def patch_lean_ctx_session_cwd() -> None:
     )
     index = replace_required(index,
         '''
-    try {
-      await mcpBridge.start(pi);
-    } catch (err) {
+    void mcpBridge.start(pi).catch((err: unknown) => {
       console.error(`[pi-lean-ctx] MCP bridge startup failed: ${err}`);
-    }
+    });
   }
 ''',
         '''
@@ -2341,7 +2355,7 @@ def patch_lean_ctx_session_cwd() -> None:
     required_index = [
         "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
         "function isMcpAdapterConfigured(projectCwd = process.cwd())",
-        "pi.exec(bin, args, cwd ? { cwd } : undefined)",
+        "execLeanCtx(pi, params.args, { signal, cwd: ctx.cwd })",
         "createCompressedBashTool(ctx.cwd)",
         "createReadToolDefinition(ctx.cwd).execute",
         "new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {\n        cwd: ctx.cwd,",

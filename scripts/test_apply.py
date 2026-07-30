@@ -90,6 +90,8 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("const applyExpansion = () => {", text)
         self.assertIn("this.fixedLayout.preserveScrollAnchor(applyExpansion);", text)
         self.assertEqual(text.count("this.fixedLayout.preserveScrollAnchor(applyExpansion);"), 1)
+        self.assertIn('this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);', text)
+        self.assertEqual(text.count('this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);'), 1)
         # Pinned "previous message" jump bar at the top of the transcript.
         self.assertIn("renderScrollLinesWithSpans(width)", text)
         self.assertIn("firstMeaningfulLine(childLines)", text)
@@ -606,11 +608,14 @@ for (const update of widgetUpdates) {{
             "new McpBridge(resolveBinary(), PI_CONFIG.forwardedEnv, {\n        cwd: ctx.cwd,",
             index_text,
         )
+        # MCP startup must stay non-blocking so it does not delay session_start.
+        self.assertIn("void mcpBridge.start(pi).catch((err: unknown) => {", index_text)
+        self.assertEqual(index_text.count("void mcpBridge.start(pi).catch"), 1)
         self.assertNotIn("mcpBridge = enableMcpBridge\n    ? new McpBridge", index_text)
         self.assertIn("createCompressedBashTool(ctx.cwd)", index_text)
         self.assertIn("createReadToolDefinition(ctx.cwd).execute", index_text)
-        self.assertIn("execLeanCtx(pi, params.args, ctx.cwd)", index_text)
-        self.assertIn('{ cwd: ctx.cwd }', index_text)
+        self.assertIn("execLeanCtx(pi, params.args, { signal, cwd: ctx.cwd })", index_text)
+        self.assertIn("{ signal, cwd: ctx.cwd }", index_text)
         self.assertIn("[pi-local-mods] Pin the MCP child to the active session cwd", bridge_text)
         self.assertIn("  cwd?: string;", bridge_text)
         self.assertIn("    this.cwd = policy.cwd ?? process.cwd();", bridge_text)
