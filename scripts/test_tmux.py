@@ -217,7 +217,7 @@ class TmuxSetupTests(unittest.TestCase):
         self.assertEqual(list(plugin_dir.glob(".*.staging-*")), [])
         self.assertEqual(list(plugin_dir.glob(".*.previous-*")), [])
 
-    def test_shell_scripts_parse_and_bonsai_uses_path(self) -> None:
+    def test_shell_scripts_parse_and_removed_side_panel_scripts_stay_gone(self) -> None:
         bash = shutil.which("bash")
         if not bash:
             self.skipTest("bash not installed")
@@ -225,12 +225,8 @@ class TmuxSetupTests(unittest.TestCase):
         for script in scripts:
             result = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, f"{script}:\n{result.stderr}")
-        bonsai = (TMUX_ROOT / "scripts" / "run-bonsai.sh").read_text()
-        self.assertIn("exec cbonsai", bonsai)
-        self.assertNotIn("/opt/homebrew", bonsai)
-        add_repo = (TMUX_ROOT / "scripts" / "add-repo.sh").read_text()
-        self.assertIn('[ "$existing" = "$REPO" ]', add_repo)
-        self.assertNotIn('case ";$REPOS;"', add_repo)
+        self.assertFalse((TMUX_ROOT / "scripts" / "run-bonsai.sh").exists())
+        self.assertFalse((TMUX_ROOT / "scripts" / "add-repo.sh").exists())
 
     def test_plugin_lock_uses_safe_names_repositories_and_full_commits(self) -> None:
         entries = self.mod.load_plugins()
