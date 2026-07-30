@@ -126,6 +126,29 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("capturedTerminalLogHitRegions.push({ type: \"toggle\", id: entry.id, row, startCol: 0", text)
         self.assertIn("const submission = await this.prepareClipboardImageSubmission(text);", text)
         self.assertNotIn("const submission = this.prepareClipboardImageSubmission(text);", text)
+        # Dropped macOS screenshot paths can contain shell-escaped Unicode
+        # whitespace. Existing image markers must not block later path drops.
+        self.assertIn('value = value.replace(/\\\\([^\\r\\n])/g, "$1");', text)
+        self.assertIn("if (this.convertingImagePathPaste || !text) {", text)
+        self.assertNotIn('text.includes("[image:")', text)
+        self.assertNodeScript(r'''
+const dropped = String.raw`[image:first.png] /var/folders/bx/pyb44zbd4vj8dhj6hwq6n38h0000gn/T/TemporaryItems/NSIRD_screencaptureui_g7slJJ/Screenshot\ 2026-07-30\ at\ 1.42.46\ PM.png`;
+const patterns = [
+  /file:\/\/[^\s]+\.(?:png|jpe?g|webp|gif)\b/gi,
+  /"(?:[^"\\]|\\.)+\.(?:png|jpe?g|webp|gif)"/gi,
+  /'(?:[^'\\]|\\.)+\.(?:png|jpe?g|webp|gif)'/gi,
+  /(?:~\/|\/)(?:\\.|[^\r\n])+?\.(?:png|jpe?g|webp|gif)\b/gi,
+];
+let raw;
+for (const pattern of patterns) {
+  raw = [...dropped.matchAll(pattern)].map((match) => match[0])[0];
+  if (raw) break;
+}
+if (!raw) throw new Error("dropped screenshot path was not detected");
+const normalized = raw.replace(/\\([^\r\n])/g, "$1");
+if (normalized.includes("\\")) throw new Error(`path still contains escape backslashes: ${normalized}`);
+if (!normalized.includes("1.42.46 PM.png")) throw new Error(`Unicode screenshot space was not preserved: ${normalized}`);
+''')
         self.assertNodeChecks(interactive)
 
         # Re-applying must not accumulate duplicate injected methods.

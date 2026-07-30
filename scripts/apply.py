@@ -1006,7 +1006,11 @@ def patch_clipboard_image_attachments(text: str) -> str:
                 value = value.slice("file://".length);
             }
         }
-        value = value.replace(/\\([\\ ()'\[\]&;])/g, "$1");
+        // Dragged macOS paths are shell-escaped, including Unicode whitespace
+        // such as the narrow no-break space before AM/PM in screenshot names.
+        // Unescape any backslash-escaped non-newline character so existsSync()
+        // sees the real filesystem path.
+        value = value.replace(/\\([^\r\n])/g, "$1");
         if (value.startsWith("~/")) {
             value = path.join(os.homedir(), value.slice(2));
         }
@@ -1063,7 +1067,7 @@ def patch_clipboard_image_attachments(text: str) -> str:
         return marker;
     }
     async convertDroppedImagePaths(text) {
-        if (this.convertingImagePathPaste || !text || text.includes("[image:")) {
+        if (this.convertingImagePathPaste || !text) {
             return;
         }
         const matches = this.extractImagePathMatches(text);
