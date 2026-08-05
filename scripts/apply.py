@@ -31,6 +31,7 @@ FOOTER = PI_PACKAGE / "dist/modes/interactive/components/footer.js"
 CUSTOM_EDITOR = PI_PACKAGE / "dist/modes/interactive/components/custom-editor.js"
 TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
 TUI_JS = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
+TUI_UTILS = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/utils.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
 BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
@@ -823,6 +824,7 @@ CLEAN_MARKERS = {
     "CUSTOM_EDITOR": "setTopBorderProvider",
     "TERMINAL": "Enable button-event mouse tracking",
     "TUI_JS": "[pi-local-mods] overlay full-redraw on appended content",
+    "TUI_UTILS": "[pi-local-mods] Match Ghostty's cell advance",
     "LEAN_CTX_INDEX": "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
     "LEAN_CTX_MCP_BRIDGE": "[pi-local-mods] Pin the MCP child to the active session cwd",
 }
@@ -2135,6 +2137,66 @@ def patch_terminal() -> None:
     TERMINAL.write_text(text)
 
 
+def patch_tui_unicode_width() -> None:
+    """Measure non-emoji graphemes by normalized printable codepoint widths."""
+    marker = CLEAN_MARKERS["TUI_UTILS"]
+    backup(TUI_UTILS, marker)
+    text = clean_source(TUI_UTILS, marker).read_text()
+    zero_width_needle = '''const zeroWidthRegex = /^(?:\\p{Default_Ignorable_Code_Point}|\\p{Control}|\\p{Mark}|\\p{Surrogate})+$/v;'''
+    zero_width_replacement = '''const zeroWidthRegex = /^(?:\\p{Default_Ignorable_Code_Point}|\\p{Control}|\\p{Nonspacing_Mark}|\\p{Enclosing_Mark}|\\p{Surrogate})+$/v;'''
+    if text.count(zero_width_needle) != 1:
+        raise SystemExit("Could not anchor pi-tui zero-width mark classification")
+    text = text.replace(zero_width_needle, zero_width_replacement, 1)
+    needle = '''    // Get base visible codepoint
+    const base = segment.replace(leadingNonPrintingRegex, "");
+    const cp = base.codePointAt(0);
+    if (cp === undefined) {
+        return 0;
+    }
+    // Regional indicator symbols (U+1F1E6..U+1F1FF) are often rendered as
+    // full-width emoji in terminals, even when isolated during streaming.
+    // Keep width conservative (2) to avoid terminal auto-wrap drift artifacts.
+    if (cp >= 0x1f1e6 && cp <= 0x1f1ff) {
+        return 2;
+    }
+    let width = eastAsianWidth(cp);
+    // Trailing halfwidth/fullwidth forms and AM vowels that segment with a base.
+    if (segment.length > 1) {
+        for (const char of segment.slice(1)) {
+            const c = char.codePointAt(0);
+            if (c >= 0xff00 && c <= 0xffef) {
+                width += eastAsianWidth(c);
+            }
+            else if (c === 0x0e33 || c === 0x0eb3) {
+                width += 1;
+            }
+        }
+    }
+    return width;'''
+    replacement = '''    // [pi-local-mods] Match Ghostty's cell advance for complex graphemes.
+    // NFC first composes Hangul and ordinary base+mark sequences. For every
+    // remaining non-emoji cluster, sum all printable codepoints rather than only
+    // the first base. Unicode spacing marks advance a cell in Ghostty, while
+    // nonspacing/enclosing marks remain zero-width. Ghostty allocates at most
+    // two cells to one grapheme. This handles Indic text without script lists.
+    const normalized = segment.normalize("NFC");
+    let width = 0;
+    for (const char of normalized) {
+        if (zeroWidthRegex.test(char))
+            continue;
+        const cp = char.codePointAt(0);
+        if (cp >= 0x1f1e6 && cp <= 0x1f1ff)
+            width += 2;
+        else
+            width += eastAsianWidth(cp);
+    }
+    return Math.min(width, 2);'''
+    if text.count(needle) != 1:
+        raise SystemExit("Could not anchor pi-tui grapheme width patch")
+    text = text.replace(needle, replacement, 1)
+    TUI_UTILS.write_text(text)
+
+
 def patch_tui_overlay_scroll() -> None:
     """Force a clean full repaint when a visible overlay participates in a changed frame.
 
@@ -2581,7 +2643,7 @@ def install_quota_dashboard() -> None:
 
 
 def verify() -> None:
-    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL, TUI_JS]
+    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL, TUI_JS, TUI_UTILS]
     if LEAN_CTX_PACKAGE.exists():
         paths.extend([LEAN_CTX_INDEX, LEAN_CTX_MCP_BRIDGE])
     for path in paths:
@@ -2595,6 +2657,7 @@ def main() -> None:
     patch_footer_component()
     patch_custom_editor()
     patch_terminal()
+    patch_tui_unicode_width()
     patch_tui_overlay_scroll()
     patch_lean_ctx_session_cwd()
     patch_bg_tasks_shortcuts()

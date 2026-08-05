@@ -467,6 +467,70 @@ for (const update of widgetUpdates) {{
         self.assertIn("Enable button-event mouse tracking with SGR encoding", text)
         self.assertNodeChecks(terminal)
 
+    def test_tui_unicode_width_patch_final_result(self) -> None:
+        marker = "[pi-local-mods] Match Ghostty's cell advance"
+        source = self.mod.clean_source(self.mod.TUI_UTILS, marker)
+        source_text = source.read_text()
+        self.assertNotIn(marker, source_text)
+        utils = self.copy_fixture(source, "pi/node_modules/@earendil-works/pi-tui/dist/utils.js")
+        self.mod.TUI_UTILS = utils
+
+        self.mod.patch_tui_unicode_width()
+        text = utils.read_text()
+
+        self.assertIn(marker, text)
+        self.assertIn('const normalized = segment.normalize("NFC");', text)
+        self.assertIn("\\p{Nonspacing_Mark}|\\p{Enclosing_Mark}", text)
+        self.assertNotIn("|\\p{Mark}|", text)
+        self.assertIn("width += eastAsianWidth(cp);", text)
+        self.assertIn("return Math.min(width, 2);", text)
+        self.assertNotIn("Script_Extensions=Devanagari", text)
+        self.assertNotIn("Script_Extensions=Gujarati", text)
+        self.assertNodeChecks(utils)
+
+        east_asian_width = (
+            self.mod.PI_PACKAGE / "node_modules/get-east-asian-width/index.js"
+        ).as_uri()
+        script = f'''const source = {json.dumps(text)}.replace(
+  'from "get-east-asian-width";',
+  'from {json.dumps(east_asian_width)};'
+);
+const mod = await import(`data:text/javascript;base64,${{Buffer.from(source).toString("base64")}}`);
+const cases = new Map([
+  ["हिन्दी", 4],
+  ["क्षत्रिय", 5],
+  ["ज्ञानी", 4],
+  ["हिन्दी क्षत्रिय ज्ञानी", 15],
+  ["ન્સ", 2],
+  ["ન્જિ", 2],
+  ["હમ મોહન આવી ગયું. હા આપજો એમને", 27],
+  ["સેન્સર વાળું હોવાથી એ એન્જિન આખું ડૂબી ગયું છે પાણીમાં 2 ફૂટ સુધી.", 51],
+  ["e\\u0301", 1],
+  ["가", 2],
+  ["กำ", 2],
+  ["👨‍👩‍👧‍👦", 2],
+  ["👍🏽", 2],
+  ["🇮🇳", 2],
+  ["日本語", 6],
+  ["العربية", 7],
+]);
+for (const [value, expected] of cases) {{
+  const actual = mod.visibleWidth(value);
+  if (actual !== expected) throw new Error(`${{JSON.stringify(value)}}: ${{actual}} !== ${{expected}}`);
+}}
+if (mod.sliceByColumn("हिन्दी", 0, 2, true) !== "हि") throw new Error("split/overflowed conjunct at width 2");
+if (mod.sliceByColumn("हिन्दी", 0, 3, true) !== "हि") throw new Error("overflowed multi-cell conjunct");
+if (mod.sliceByColumn("हिन्दी", 0, 4, true) !== "हिन्दी") throw new Error("failed to fit exact-width word");
+if (mod.sliceByColumn("સેન્સર", 0, 2, true) !== "સે") throw new Error("split/overflowed Gujarati conjunct at width 2");
+if (mod.sliceByColumn("સેન્સર", 0, 3, true) !== "સેન્સ") throw new Error("failed to fit Gujarati conjunct");
+'''
+        self.assertNodeScript(script)
+
+        first_apply = utils.read_bytes()
+        self.mod.patch_tui_unicode_width()
+        self.assertEqual(utils.read_bytes(), first_apply)
+        self.assertNotIn(marker, utils.with_suffix(utils.suffix + ".pi-local-mods.bak").read_text())
+
     def test_tui_overlay_scroll_patch_final_result(self) -> None:
         source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
         source_text = source.read_text()
