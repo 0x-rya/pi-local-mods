@@ -29,8 +29,6 @@ INTERACTIVE = PI_PACKAGE / "dist/modes/interactive/interactive-mode.js"
 CLIPBOARD_IMAGE = PI_PACKAGE / "dist/utils/clipboard-image.js"
 FOOTER = PI_PACKAGE / "dist/modes/interactive/components/footer.js"
 CUSTOM_EDITOR = PI_PACKAGE / "dist/modes/interactive/components/custom-editor.js"
-TERMINAL = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
-TUI_JS = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
 TUI_UTILS = PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/utils.js"
 BG_TASKS_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-patty-bg-tasks"
 BG_TASKS_SHORTCUTS = BG_TASKS_PACKAGE / "src/shortcuts.ts"
@@ -38,770 +36,130 @@ BG_TASKS_HINT = BG_TASKS_PACKAGE / "src/hint.ts"
 LEAN_CTX_PACKAGE = PI_AGENT_DIR / "npm/node_modules/pi-lean-ctx"
 LEAN_CTX_INDEX = LEAN_CTX_PACKAGE / "extensions/index.ts"
 LEAN_CTX_MCP_BRIDGE = LEAN_CTX_PACKAGE / "extensions/mcp-bridge.ts"
-QUOTA_DASHBOARD_SRC = ROOT / "extensions" / "quota-dashboard.ts"
-QUOTA_DASHBOARD_DST = PI_AGENT_DIR / "extensions" / "quota-dashboard.ts"
+EXTENSION_SOURCES = (
+    ROOT / "extensions" / "quota-dashboard.ts",
+    ROOT / "extensions" / "terminal-logs.ts",
+)
 
-FIXED_BOTTOM_SCROLL_LAYOUT = r'''class FixedBottomScrollLayout {
-    ui;
-    scrollChildren;
-    pinnedChildren;
-    scrollOffset = 0;
-    lastScrollableLineCount = 0;
-    lastVisibleStart = 0;
-    lastTranscriptRows = 1;
-    lastTopPadding = 0;
-    lastScrollLines = [];
-    selection = undefined;
-    selectionAutoCopy = /^(1|true|yes)$/i.test(process.env.PI_SELECTION_AUTO_COPY ?? "");
-    chatContainer;
-    messageSpans = [];
-    topMessageTarget;
-    topMessagePreview = "";
-    bottomMessageTarget;
-    bottomMessagePreview = "";
-    lastTopBarRow = -1;
-    lastBottomBarRow = -1;
-    constructor(ui, scrollChildren, pinnedChildren, chatContainer) {
-        this.ui = ui;
-        this.scrollChildren = scrollChildren;
-        this.pinnedChildren = pinnedChildren;
-        // chatContainer is scrollChildren[2]; the explicit arg lets future
-        // callers pass it directly. It maps transcript lines back to messages
-        // for the pinned "previous message" jump bar.
-        this.chatContainer = chatContainer ?? scrollChildren[2];
-    }
-    invalidate() {
-        for (const child of [...this.scrollChildren, ...this.pinnedChildren]) {
-            child.invalidate?.();
+PROMPT_NAVIGATION_METHODS = r'''    getPromptNavigationState(width, refresh = false) {
+        const scrollView = this.transcriptScrollView;
+        if (!scrollView || width <= 0 || scrollView.viewportHeight <= 0) {
+            return { previous: undefined, next: undefined };
         }
-    }
-    renderChildren(children, width) {
-        const lines = [];
-        for (const child of children) {
-            lines.push(...child.render(width));
+        const cached = this.promptNavigationStateCache;
+        if (!refresh && cached && cached.width === width && cached.scrollTop === scrollView.scrollTop && cached.viewportHeight === scrollView.viewportHeight) {
+            return cached.state;
         }
-        return lines;
-    }
-    // Render the scroll children, recording the line span of each chat message
-    // so the top "previous message" bar can preview/jump to it. Container.render
-    // is a pure concat of child.render(), so iterating chatContainer.children
-    // reproduces the exact same lines as chatContainer.render(width).
-    renderScrollLinesWithSpans(width) {
-        const lines = [];
+        const contentWidth = scrollView.getContentWidth(width);
+        let line = this.headerContainer.render(contentWidth).length + this.loadedResourcesContainer.render(contentWidth).length;
         const spans = [];
-        for (const child of this.scrollChildren) {
-            if (child === this.chatContainer && Array.isArray(child.children)) {
-                for (const grandChild of child.children) {
-                    const childLines = grandChild.render(width);
-                    const startLine = lines.length;
-                    // Only user messages are jump targets for the top bar.
-                    if (grandChild instanceof UserMessageComponent) {
-                        const preview = this.firstMeaningfulLine(childLines);
-                        if (preview) {
-                            spans.push({ start: startLine, end: startLine + childLines.length - 1, preview });
-                        }
-                    }
-                    for (const line of childLines) {
-                        lines.push(line);
+        for (const child of this.chatContainer.children) {
+            const childLines = child.render(contentWidth);
+            const start = line;
+            const end = start + childLines.length - 1;
+            if (child instanceof UserMessageComponent) {
+                let preview = "";
+                for (const raw of childLines) {
+                    const plain = raw
+                        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+                        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+                        .replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "")
+                        .trim();
+                    if (plain && /\p{L}|\p{N}/u.test(plain)) {
+                        preview = plain;
+                        break;
                     }
                 }
-            }
-            else {
-                const childLines = child.render(width);
-                for (const line of childLines) {
-                    lines.push(line);
+                if (preview) {
+                    spans.push({ start, end, preview });
                 }
             }
+            line += childLines.length;
         }
-        this.messageSpans = spans;
-        return lines;
-    }
-    firstMeaningfulLine(childLines) {
-        for (const raw of childLines) {
-            const plain = this.stripAnsi(raw).trim();
-            if (plain && /\p{L}|\p{N}/u.test(plain)) {
-                return plain;
-            }
-        }
-        return "";
-    }
-    findPreviousMessage(spans, startLine) {
-        let prev = undefined;
+        const viewportStart = scrollView.scrollTop;
+        const viewportEnd = viewportStart + scrollView.viewportHeight;
+        let previous;
+        let next;
         for (const span of spans) {
-            if (span.start < startLine && (!prev || span.start > prev.start)) {
-                prev = span;
+            if (span.start < viewportStart) {
+                previous = span;
             }
-        }
-        return prev;
-    }
-    findNextMessage(spans, threshold) {
-        let next = undefined;
-        for (const span of spans) {
-            if (span.start >= threshold && (!next || span.start < next.start)) {
+            else if (!next && span.start >= viewportEnd) {
                 next = span;
             }
         }
-        return next;
-    }
-    scrollToMessageStart(targetStart) {
-        const width = this.ui.terminal?.columns ?? 80;
-        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
-        const pinnedLines = this.renderChildren(this.pinnedChildren, width);
-        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
-        const visiblePinned = pinnedLines.slice(Math.max(0, pinnedLines.length - pinnedRows));
-        const transcriptRows = Math.max(1, termRows - visiblePinned.length);
-        const scrollLines = this.renderChildren(this.scrollChildren, width);
-        const maxStart = Math.max(0, scrollLines.length - transcriptRows);
-        // Land the target message's first line just below the top marker.
-        const newStart = Math.max(0, Math.min(targetStart - 1, maxStart));
-        this.scrollOffset = Math.max(0, Math.min(maxStart - newStart, this.maxScrollOffset(transcriptRows)));
-        this.ui.requestRender();
-    }
-    maxScrollOffset(viewportRows) {
-        return Math.max(0, this.lastScrollableLineCount - viewportRows);
-    }
-    scrollBy(rows) {
-        const termRows = this.ui.terminal?.rows ?? 24;
-        const pinnedRows = this.renderChildren(this.pinnedChildren, this.ui.terminal?.columns ?? 80).length;
-        const viewportRows = Math.max(1, termRows - pinnedRows);
-        this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset(viewportRows), this.scrollOffset + rows));
-        this.ui.requestRender();
-    }
-    scrollToBottom() {
-        if (this.scrollOffset !== 0) {
-            this.scrollOffset = 0;
-            this.ui.requestRender();
-        }
-    }
-    preserveScrollAnchor(callback) {
-        if (this.scrollOffset <= 0) {
-            callback();
-            this.ui.requestRender();
-            return;
-        }
-        const width = this.ui.terminal?.columns ?? 80;
-        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
-        const pinnedLines = this.renderChildren(this.pinnedChildren, width);
-        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
-        const transcriptRows = Math.max(1, termRows - pinnedRows);
-        const oldLines = this.renderChildren(this.scrollChildren, width);
-        const oldMaxStart = Math.max(0, oldLines.length - transcriptRows);
-        const oldStart = Math.max(0, oldMaxStart - this.scrollOffset);
-        const anchorRow = oldStart + 1 < oldLines.length ? 1 : 0;
-        const anchorIndex = oldStart + anchorRow;
-        const anchorLine = oldLines[anchorIndex];
-        callback();
-        const newLines = this.renderChildren(this.scrollChildren, width);
-        this.lastScrollableLineCount = newLines.length;
-        const newMaxStart = Math.max(0, newLines.length - transcriptRows);
-        let newAnchorIndex = -1;
-        if (anchorLine !== undefined) {
-            for (let i = 0; i < newLines.length; i++) {
-                if (newLines[i] !== anchorLine)
-                    continue;
-                if (newAnchorIndex === -1 || Math.abs(i - anchorIndex) < Math.abs(newAnchorIndex - anchorIndex)) {
-                    newAnchorIndex = i;
-                }
-            }
-        }
-        const newStart = newAnchorIndex === -1
-            ? Math.min(oldStart, newMaxStart)
-            : Math.max(0, Math.min(newAnchorIndex - anchorRow, newMaxStart));
-        this.scrollOffset = Math.max(0, Math.min(newMaxStart - newStart, this.maxScrollOffset(transcriptRows)));
-        this.ui.requestRender();
-    }
-    stripAnsi(text) {
-        return text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
-    }
-    positionFromMouse(x, y) {
-        const row = y - 1;
-        if (row < 0 || row >= this.lastTranscriptRows) {
-            return undefined;
-        }
-        const visibleRow = row - this.lastTopPadding;
-        if (visibleRow < 0) {
-            return undefined;
-        }
-        if (this.scrollOffset > 0 && visibleRow === 0) {
-            return undefined;
-        }
-        const line = this.lastVisibleStart + visibleRow;
-        if (line < 0 || line >= this.lastScrollableLineCount) {
-            return undefined;
-        }
-        return { line, col: Math.max(0, x - 1) };
-    }
-    normalizedSelection() {
-        if (!this.selection)
-            return undefined;
-        const { anchor, focus } = this.selection;
-        if (anchor.line < focus.line || (anchor.line === focus.line && anchor.col <= focus.col)) {
-            return { start: anchor, end: focus };
-        }
-        return { start: focus, end: anchor };
-    }
-    getSelectedText() {
-        const range = this.normalizedSelection();
-        if (!range)
-            return "";
-        const lines = [];
-        for (let lineIndex = range.start.line; lineIndex <= range.end.line; lineIndex++) {
-            const plain = this.stripAnsi(this.lastScrollLines[lineIndex] ?? "");
-            const startCol = lineIndex === range.start.line ? range.start.col : 0;
-            const endCol = lineIndex === range.end.line ? range.end.col : visibleWidth(plain);
-            const width = Math.max(0, endCol - startCol);
-            lines.push(sliceByColumn(plain, startCol, width, true));
-        }
-        return lines.join("\n").replace(/[ \t]+$/gm, "").replace(/^\n+|\n+$/g, "");
-    }
-    copySelection() {
-        const text = this.getSelectedText();
-        if (!text)
-            return false;
-        void copyToClipboard(text);
-        return true;
-    }
-    startSelection(pos) {
-        this.selection = { anchor: pos, focus: pos, dragging: true };
-        this.ui.requestRender();
-    }
-    updateSelection(pos) {
-        if (!this.selection)
-            return;
-        this.selection = { ...this.selection, focus: pos };
-        this.ui.requestRender();
-    }
-    finishSelection() {
-        if (!this.selection)
-            return;
-        this.selection = { ...this.selection, dragging: false };
-        if (this.selectionAutoCopy) {
-            this.copySelection();
-        }
-        this.ui.requestRender();
-    }
-    applySelectionToLine(line, absoluteLineIndex) {
-        const range = this.normalizedSelection();
-        if (!range || absoluteLineIndex < range.start.line || absoluteLineIndex > range.end.line) {
-            return line;
-        }
-        const lineWidth = visibleWidth(line);
-        const startCol = absoluteLineIndex === range.start.line ? Math.min(range.start.col, lineWidth) : 0;
-        const endCol = absoluteLineIndex === range.end.line ? Math.min(range.end.col, lineWidth) : lineWidth;
-        if (endCol <= startCol) {
-            return line;
-        }
-        const before = sliceByColumn(line, 0, startCol, true);
-        const selected = sliceByColumn(line, startCol, endCol - startCol, true);
-        const after = sliceByColumn(line, endCol, Math.max(0, lineWidth - endCol), true);
-        return `${before}\x1b[7m${selected}\x1b[27m${after}`;
-    }
-    handleMouse(data) {
-        const mouseMatch = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([mM])$/);
-        if (!mouseMatch)
-            return undefined;
-        const button = Number(mouseMatch[1]);
-        const x = Number(mouseMatch[2]);
-        const y = Number(mouseMatch[3]);
-        const eventType = mouseMatch[4];
-        if (eventType === "M" && (button & 64) !== 0) {
-            const wheelDirection = button & 3;
-            if (wheelDirection === 0) {
-                this.scrollBy(3);
-                return { consume: true };
-            }
-            if (wheelDirection === 1) {
-                this.scrollBy(-3);
-                return { consume: true };
-            }
-        }
-        if (eventType === "M" && (button & 32) !== 0 && this.selection?.dragging) {
-            if (y <= 2) {
-                this.scrollBy(2);
-            }
-            else if (y >= (this.ui.terminal?.rows ?? 24) - 1) {
-                this.scrollBy(-2);
-            }
-            const pos = this.positionFromMouse(x, y);
-            if (pos)
-                this.updateSelection(pos);
-            return { consume: true };
-        }
-        if (eventType === "M" && (button & 3) === 0) {
-            // Click on a pinned message bar → jump to that message.
-            const row = y - 1;
-            if (this.topMessageTarget != null && row === this.lastTopBarRow) {
-                this.scrollToMessageStart(this.topMessageTarget);
-                return { consume: true };
-            }
-            if (this.bottomMessageTarget != null && row === this.lastBottomBarRow) {
-                this.scrollToMessageStart(this.bottomMessageTarget);
-                return { consume: true };
-            }
-            const pos = this.positionFromMouse(x, y);
-            if (pos) {
-                this.startSelection(pos);
-                return { consume: true };
-            }
-        }
-        if (eventType === "m") {
-            this.finishSelection();
-            return { consume: true };
-        }
-        return undefined;
-    }
-    handleInput(data) {
-        const mouseResult = this.handleMouse(data);
-        if (mouseResult)
-            return mouseResult;
-        if (this.selection && matchesKey(data, "ctrl+x")) {
-            if (this.copySelection()) {
-                return { consume: true };
-            }
-        }
-        if (this.selection && matchesKey(data, "escape")) {
-            this.selection = undefined;
-            this.ui.requestRender();
-            return { consume: true };
-        }
-        const termRows = this.ui.terminal?.rows ?? 24;
-        const page = Math.max(3, Math.floor(termRows * 0.7));
-        if (matchesKey(data, "pageUp") || matchesKey(data, "shift+pageUp")) {
-            this.scrollBy(page);
-            return { consume: true };
-        }
-        if (matchesKey(data, "pageDown") || matchesKey(data, "shift+pageDown")) {
-            this.scrollBy(-page);
-            return { consume: true };
-        }
-        if (matchesKey(data, "alt+up")) {
-            this.scrollBy(5);
-            return { consume: true };
-        }
-        if (matchesKey(data, "alt+down")) {
-            this.scrollBy(-5);
-            return { consume: true };
-        }
-        if (matchesKey(data, "home") || matchesKey(data, "shift+alt+left") || matchesKey(data, "shift+alt+up")) {
-            this.scrollBy(Number.MAX_SAFE_INTEGER);
-            return { consume: true };
-        }
-        if ((matchesKey(data, "end") || matchesKey(data, "shift+alt+right") || matchesKey(data, "shift+alt+down")) && this.scrollOffset > 0) {
-            this.scrollToBottom();
-            return { consume: true };
-        }
-        return undefined;
-    }
-    render(width) {
-        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
-        const pinnedLines = this.renderChildren(this.pinnedChildren, width);
-        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
-        const visiblePinned = pinnedLines.slice(Math.max(0, pinnedLines.length - pinnedRows));
-        let transcriptRows = Math.max(1, termRows - visiblePinned.length);
-        const previousScrollableLineCount = this.lastScrollableLineCount;
-        const scrollLines = this.renderScrollLinesWithSpans(width);
-        this.lastScrollLines = scrollLines;
-        if (this.scrollOffset > 0 && scrollLines.length > previousScrollableLineCount) {
-            this.scrollOffset += scrollLines.length - previousScrollableLineCount;
-        }
-        this.lastScrollableLineCount = scrollLines.length;
-        this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.maxScrollOffset(transcriptRows)));
-        const maxStart = Math.max(0, scrollLines.length - transcriptRows);
-        const start = Math.max(0, maxStart - this.scrollOffset);
-        this.lastVisibleStart = start;
-        this.lastTranscriptRows = transcriptRows;
-        let visibleScroll = scrollLines.slice(start, start + transcriptRows);
-        this.lastTopPadding = Math.max(0, transcriptRows - visibleScroll.length);
-        visibleScroll = visibleScroll.map((line, idx) => this.applySelectionToLine(line, start + idx));
-        this.topMessageTarget = undefined;
-        this.topMessagePreview = "";
-        this.bottomMessageTarget = undefined;
-        this.bottomMessagePreview = "";
-        this.lastTopBarRow = -1;
-        this.lastBottomBarRow = -1;
-        // Lines above the viewport = start; lines below = scrollOffset (newer
-        // content hidden underneath). The top bar reports above, the bottom bar
-        // below — so each arrow points at the content it describes.
-        const aboveCount = start;
-        const belowCount = this.scrollOffset;
-        const aboveLead = aboveCount > 0 ? `${aboveCount}↑` : "↑";
-        const viewportTopContentLine = start + (this.scrollOffset > 0 ? 1 : 0);
-        const prev = this.findPreviousMessage(this.messageSpans, viewportTopContentLine);
-        if (prev && visibleScroll.length > 0) {
-            this.topMessageTarget = prev.start;
-            this.topMessagePreview = prev.preview;
-            this.lastTopBarRow = this.lastTopPadding;
-            const bottomHint = this.scrollOffset > 0 ? " · Opt+↓/End to bottom" : "";
-            const topSuffix = ` · click to jump${bottomHint}`;
-            // Budget the preview against the prefix (lead + separator) and the
-            // suffix so the assembled bar can never exceed the terminal width.
-            const topAvail = Math.max(0, width - (visibleWidth(aboveLead) + 1) - visibleWidth(topSuffix));
-            const snippet = truncateToWidth(prev.preview, topAvail, theme.fg("dim", "…"));
-            let topLine = theme.fg("accent", aboveLead) + " " + theme.fg("muted", snippet) + theme.fg("dim", topSuffix);
-            if (visibleWidth(topLine) > width) {
-                topLine = truncateToWidth(topLine, width, theme.fg("dim", "…"));
-            }
-            visibleScroll[0] = topLine;
-        }
-        else if (this.scrollOffset > 0 && visibleScroll.length > 0) {
-            visibleScroll[0] = theme.fg("warning", aboveLead) + theme.fg("dim", " · Opt+↓/End to bottom");
-        }
-        // Bottom sticky bar: next user message below the viewport (scrolled only).
-        if (this.scrollOffset > 0 && visibleScroll.length > 1) {
-            const nextThreshold = start + visibleScroll.length - 1;
-            const next = this.findNextMessage(this.messageSpans, nextThreshold);
-            const belowTag = `${belowCount}↓`;
-            this.lastBottomBarRow = this.lastTopPadding + (visibleScroll.length - 1);
-            if (next) {
-                this.bottomMessageTarget = next.start;
-                this.bottomMessagePreview = next.preview;
-                const bottomSuffix = " · click to jump";
-                const bottomAvail = Math.max(0, width - (visibleWidth(belowTag) + 1) - visibleWidth(bottomSuffix));
-                const snippet = truncateToWidth(next.preview, bottomAvail, theme.fg("dim", "…"));
-                let bottomLine = theme.fg("accent", belowTag) + " " + theme.fg("muted", snippet) + theme.fg("dim", bottomSuffix);
-                if (visibleWidth(bottomLine) > width) {
-                    bottomLine = truncateToWidth(bottomLine, width, theme.fg("dim", "…"));
-                }
-                visibleScroll[visibleScroll.length - 1] = bottomLine;
-            }
-            else {
-                // No user message below, but newer content still exists below.
-                visibleScroll[visibleScroll.length - 1] = theme.fg("warning", belowTag) + theme.fg("dim", " · Opt+↓/End to bottom");
-            }
-        }
-        if (this.lastTopPadding > 0) {
-            visibleScroll = [...Array(this.lastTopPadding).fill(""), ...visibleScroll];
-        }
-        const lines = [...visibleScroll, ...visiblePinned];
-        return lines.slice(Math.max(0, lines.length - termRows));
-    }
-}'''
-
-
-TERMINAL_LOG_GUARD_METHODS = r'''    installTerminalOutputGuard() {
-        if (this.terminalOutputGuard) {
-            return;
-        }
-        const originalStderrWrite = process.stderr.write;
-        const originalConsoleError = console.error;
-        const originalConsoleWarn = console.warn;
-        const originalConsoleLog = console.log;
-        const capture = (source, args) => {
-            this.captureTerminalLog(source, `${formatConsoleArgs(...args)}\n`);
+        const state = { previous, next };
+        this.promptNavigationStateCache = {
+            width,
+            scrollTop: scrollView.scrollTop,
+            viewportHeight: scrollView.viewportHeight,
+            state,
         };
-        const stderrWrite = ((chunk, encodingOrCallback, callback) => {
-            this.captureTerminalLog("stderr", Buffer.isBuffer(chunk) ? chunk.toString(typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8") : String(chunk));
-            const cb = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
-            if (cb) {
-                process.nextTick(cb);
-            }
-            return true;
-        });
-        const consoleError = (...args) => capture("console.error", args);
-        const consoleWarn = (...args) => capture("console.warn", args);
-        const consoleLog = (...args) => capture("console.log", args);
-        process.stderr.write = stderrWrite;
-        console.error = consoleError;
-        console.warn = consoleWarn;
-        console.log = consoleLog;
-        this.terminalOutputGuard = {
-            originalStderrWrite,
-            originalConsoleError,
-            originalConsoleWarn,
-            originalConsoleLog,
-            stderrWrite,
-            consoleError,
-            consoleWarn,
-            consoleLog,
-        };
+        return state;
     }
-    uninstallTerminalOutputGuard(options = {}) {
-        const guard = this.terminalOutputGuard;
-        if (!guard) {
-            return;
+    renderPromptNavigationBar(direction, width, refresh = false) {
+        const state = this.getPromptNavigationState(width, refresh);
+        const target = direction < 0 ? state.previous : state.next;
+        if (!target || width <= 0) {
+            return [];
         }
-        if (this.capturedTerminalLogRenderTimer) {
-            clearTimeout(this.capturedTerminalLogRenderTimer);
-            this.capturedTerminalLogRenderTimer = undefined;
+        const scrollView = this.transcriptScrollView;
+        const edge = direction < 0 ? scrollView.scrollTop : scrollView.scrollTop + scrollView.viewportHeight;
+        const distance = Math.max(1, Math.abs(target.start - edge));
+        const arrow = direction < 0 ? "↑" : "↓";
+        const lead = `${distance}${arrow}`;
+        const suffix = " · click to jump";
+        const previewWidth = Math.max(0, width - visibleWidth(lead) - visibleWidth(suffix) - 1);
+        const preview = truncateToWidth(target.preview, previewWidth, theme.fg("dim", "…"));
+        let line = theme.fg("accent", lead) + " " + theme.fg("muted", preview) + theme.fg("dim", suffix);
+        if (visibleWidth(line) > width) {
+            line = truncateToWidth(line, width, theme.fg("dim", "…"));
         }
-        this.flushCapturedTerminalLogPartials(options.render !== false);
-        if (process.stderr.write === guard.stderrWrite) {
-            process.stderr.write = guard.originalStderrWrite;
-        }
-        if (console.error === guard.consoleError) {
-            console.error = guard.originalConsoleError;
-        }
-        if (console.warn === guard.consoleWarn) {
-            console.warn = guard.originalConsoleWarn;
-        }
-        if (console.log === guard.consoleLog) {
-            console.log = guard.originalConsoleLog;
-        }
-        this.terminalOutputGuard = undefined;
+        const destination = direction < 0 ? "previous" : "next";
+        return [hyperlink(line, `pi://prompt-navigation/${destination}`)];
     }
-    sanitizeCapturedTerminalLog(text) {
-        return text
-            .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-            .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-            .replace(/\x1b[_^PX][\s\S]*?(?:\x07|\x1b\\)/g, "")
-            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
-    }
-    addCapturedTerminalLogLine(source, line) {
-        const trimmed = line.trimEnd();
-        if (trimmed.length === 0) {
-            return false;
-        }
-        this.capturedTerminalLogs.push({
-            id: this.capturedTerminalLogNextId++,
-            source,
-            text: trimmed,
-            expanded: false,
-        });
-        const maxStored = 50;
-        if (this.capturedTerminalLogs.length > maxStored) {
-            this.capturedTerminalLogs.splice(0, this.capturedTerminalLogs.length - maxStored);
-        }
-        return true;
-    }
-    captureTerminalLog(source, text) {
-        if (!this.isInitialized && !this.fixedLayout) {
-            return;
-        }
-        const sanitized = this.sanitizeCapturedTerminalLog(text).replace(/\r/g, "\n");
-        const combined = (this.capturedTerminalLogPartials.get(source) ?? "") + sanitized;
-        const parts = combined.split("\n");
-        let partial = parts.pop() ?? "";
-        let changed = false;
-        for (const part of parts) {
-            changed = this.addCapturedTerminalLogLine(source, part) || changed;
-        }
-        if (partial.length > 4000) {
-            changed = this.addCapturedTerminalLogLine(source, partial) || changed;
-            partial = "";
-        }
-        if (partial) {
-            this.capturedTerminalLogPartials.set(source, partial);
-        }
-        else {
-            this.capturedTerminalLogPartials.delete(source);
-        }
-        if (changed) {
-            this.scheduleCapturedTerminalLogRender();
-        }
-    }
-    flushCapturedTerminalLogPartials(render = true) {
-        let changed = false;
-        for (const [source, partial] of this.capturedTerminalLogPartials) {
-            changed = this.addCapturedTerminalLogLine(source, partial) || changed;
-        }
-        this.capturedTerminalLogPartials.clear();
-        if (changed && render) {
-            this.renderCapturedTerminalLogs();
-        }
-    }
-    scheduleCapturedTerminalLogRender() {
-        if (this.capturedTerminalLogRenderTimer) {
-            return;
-        }
-        this.capturedTerminalLogRenderTimer = setTimeout(() => {
-            this.capturedTerminalLogRenderTimer = undefined;
-            this.renderCapturedTerminalLogs();
-        }, 50);
-    }
-    wrapCapturedTerminalLogLine(text, width) {
-        const lines = [];
-        let remaining = text;
-        while (visibleWidth(remaining) > width) {
-            lines.push(sliceByColumn(remaining, 0, width, true));
-            remaining = sliceByColumn(remaining, width, Math.max(0, visibleWidth(remaining) - width), true);
-        }
-        lines.push(remaining);
-        return lines;
-    }
-    removeCapturedTerminalLog(id) {
-        this.capturedTerminalLogs = this.capturedTerminalLogs.filter((entry) => entry.id !== id);
-        this.renderCapturedTerminalLogs();
-    }
-    toggleCapturedTerminalLog(id) {
-        const entry = this.capturedTerminalLogs.find((item) => item.id === id);
-        if (entry) {
-            entry.expanded = !entry.expanded;
-            this.renderCapturedTerminalLogs();
-        }
-    }
-    copyCapturedTerminalLog(id) {
-        const entry = this.capturedTerminalLogs.find((item) => item.id === id);
-        if (entry) {
-            void copyToClipboard(`[${entry.source}] ${entry.text}`);
-        }
-    }
-    clearCapturedTerminalLogs() {
-        this.capturedTerminalLogs = [];
-        this.capturedTerminalLogPartials.clear();
-        this.renderCapturedTerminalLogs();
-    }
-    handleCapturedTerminalLogInput(data) {
-        const mouseMatch = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([mM])$/);
-        if (!mouseMatch || mouseMatch[4] !== "M") {
-            return undefined;
-        }
-        const button = Number(mouseMatch[1]);
-        if ((button & 3) !== 0 || (button & 64) !== 0) {
-            return undefined;
-        }
-        if (!this.capturedTerminalLogComponent || !this.fixedLayout) {
-            return undefined;
-        }
-        const x = Number(mouseMatch[2]) - 1;
-        const y = Number(mouseMatch[3]) - 1;
+    navigatePromptBar(direction) {
         const width = this.ui.terminal?.columns ?? 80;
-        const termRows = Math.max(1, this.ui.terminal?.rows ?? 24);
-        const pinnedLines = this.fixedLayout.renderChildren(this.fixedLayout.pinnedChildren, width);
-        const pinnedRows = Math.min(pinnedLines.length, termRows - 1);
-        const visiblePinnedStart = Math.max(0, pinnedLines.length - pinnedRows);
-        const localRow = y - (termRows - pinnedRows) + visiblePinnedStart;
-        const hitCandidates = this.capturedTerminalLogHitRegions.filter((region) => region.row === localRow && x >= region.startCol && x < region.endCol);
-        const priority = { copy: 0, close: 1, clear: 1, toggle: 2 };
-        const hit = hitCandidates.sort((a, b) => (priority[a.type] ?? 99) - (priority[b.type] ?? 99))[0];
-        if (!hit) {
-            return undefined;
-        }
-        if (hit.type === "clear") {
-            this.clearCapturedTerminalLogs();
-        }
-        else if (hit.type === "close") {
-            this.removeCapturedTerminalLog(hit.id);
-        }
-        else if (hit.type === "copy") {
-            this.copyCapturedTerminalLog(hit.id);
-        }
-        else if (hit.type === "toggle") {
-            this.toggleCapturedTerminalLog(hit.id);
-        }
-        return { consume: true };
-    }
-    renderCapturedTerminalLogs() {
-        this.terminalLogContainer.clear();
-        if (this.capturedTerminalLogs.length === 0) {
-            this.capturedTerminalLogComponent = undefined;
-            this.capturedTerminalLogHitRegions = [];
-            this.ui.requestRender();
+        const state = this.getPromptNavigationState(width, true);
+        const target = direction < 0 ? state.previous : state.next;
+        if (!target) {
             return;
         }
-        const getLogs = () => this.capturedTerminalLogs.slice();
-        this.capturedTerminalLogComponent = {
-            render: (width) => {
-                this.capturedTerminalLogHitRegions = [];
-                if (width <= 0) {
-                    return [];
-                }
-                const fit = (line) => visibleWidth(line) > width ? sliceByColumn(line, 0, width, true) : line;
-                const logs = getLogs();
-                const maxShown = 8;
-                const shown = logs.slice(-maxShown);
-                const hidden = Math.max(0, logs.length - shown.length);
-                const closeAll = width >= 8 ? " [×]" : "";
-                const title = `Captured terminal logs (${shown.length}${hidden ? ` shown, ${hidden} hidden` : ""})`;
-                const titleWidth = Math.max(0, width - visibleWidth(closeAll));
-                const truncatedTitle = visibleWidth(title) > titleWidth ? (titleWidth <= 1 ? "…" : `${sliceByColumn(title, 0, titleWidth - 1, true)}…`) : title;
-                const header = theme.fg("warning", truncatedTitle) + theme.fg("dim", closeAll);
-                if (closeAll) {
-                    const headerCloseStart = visibleWidth(truncatedTitle) + 1;
-                    this.capturedTerminalLogHitRegions.push({ type: "clear", row: 0, startCol: headerCloseStart, endCol: Math.min(width, headerCloseStart + 3) });
-                }
-                const lines = [fit(header)];
-                let row = 1;
-                for (const entry of shown) {
-                    if (entry.expanded) {
-                        const controls = "× ▾ [copy] ";
-                        const head = `${entry.source}: ${entry.text}`;
-                        const headAvailable = Math.max(0, width - visibleWidth(controls));
-                        const headText = visibleWidth(head) > headAvailable ? (headAvailable <= 1 ? "…" : `${sliceByColumn(head, 0, headAvailable - 1, true)}…`) : head;
-                        lines.push(fit(theme.fg("dim", "×") + " " + theme.fg("warning", "▾") + " " + theme.fg("accent", "[copy]") + " " + theme.fg("warning", headText)));
-                        this.capturedTerminalLogHitRegions.push({ type: "close", id: entry.id, row, startCol: 0, endCol: 1 });
-                        this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 2, endCol: width });
-                        this.capturedTerminalLogHitRegions.push({ type: "copy", id: entry.id, row, startCol: 4, endCol: 10 });
-                        row++;
-                        const bodyPrefix = "  │ ";
-                        const bodyWidth = Math.max(1, width - visibleWidth(bodyPrefix));
-                        for (const wrapped of this.wrapCapturedTerminalLogLine(entry.text, bodyWidth)) {
-                            lines.push(fit(theme.fg("dim", bodyPrefix) + theme.fg("warning", wrapped)));
-                            this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 0, endCol: width });
-                            row++;
+        this.transcriptScrollView.scrollTo(target.start);
+        this.ui.requestRender();
+    }
+    handleInteractiveUrl(url) {
+        if (url === "pi://prompt-navigation/previous") {
+            this.navigatePromptBar(-1);
+            return;
+        }
+        if (url === "pi://prompt-navigation/next") {
+            this.navigatePromptBar(1);
+            return;
+        }
+        if (url.startsWith("pi-local://")) {
+            const registry = globalThis[Symbol.for("pi-local-mods.action-handlers")];
+            if (registry instanceof Map) {
+                for (const [prefix, handler] of registry) {
+                    if (url.startsWith(prefix) && typeof handler === "function") {
+                        try {
+                            if (handler(url) !== false) {
+                                return;
+                            }
+                        }
+                        catch (error) {
+                            this.showWarning(`Local action failed: ${error instanceof Error ? error.message : String(error)}`);
+                            return;
                         }
                     }
-                    else {
-                        const controls = "× ▸ ";
-                        const text = `${entry.source}: ${entry.text}`;
-                        const available = Math.max(0, width - visibleWidth(controls));
-                        const truncated = visibleWidth(text) > available ? (available <= 1 ? "…" : `${sliceByColumn(text, 0, available - 1, true)}…`) : text;
-                        lines.push(fit(theme.fg("dim", "×") + " " + theme.fg("warning", "▸") + " " + theme.fg("warning", truncated)));
-                        this.capturedTerminalLogHitRegions.push({ type: "close", id: entry.id, row, startCol: 0, endCol: 1 });
-                        this.capturedTerminalLogHitRegions.push({ type: "toggle", id: entry.id, row, startCol: 2, endCol: width });
-                        row++;
-                    }
                 }
-                return lines;
-            },
-            invalidate: () => { },
-        };
-        this.terminalLogContainer.addChild(this.capturedTerminalLogComponent);
-        this.ui.requestRender();
+            }
+            this.showWarning(`No local action handler is registered for ${url}`);
+            return;
+        }
+        openBrowser(url);
     }
 '''
-
-
-def patch_terminal_log_guard(text: str) -> str:
-    if 'import { format as formatConsoleArgs } from "node:util";' not in text:
-        text = text.replace('import * as path from "node:path";', 'import * as path from "node:path";\nimport { format as formatConsoleArgs } from "node:util";')
-    if 'terminalLogContainer;' not in text:
-        text = text.replace('    pendingMessagesContainer;\n    statusContainer;', '    pendingMessagesContainer;\n    terminalLogContainer;\n    statusContainer;')
-    if 'capturedTerminalLogs = [];' not in text:
-        text = text.replace(
-            '    // Extension UI state\n    extensionSelector = undefined;',
-            '    // Captured terminal logs (stderr/console) rendered through the TUI so raw logs cannot cover the editor/footer.\n'
-            '    capturedTerminalLogs = [];\n'
-            '    capturedTerminalLogNextId = 1;\n'
-            '    capturedTerminalLogComponent = undefined;\n'
-            '    capturedTerminalLogHitRegions = [];\n'
-            '    capturedTerminalLogPartials = new Map();\n'
-            '    capturedTerminalLogRenderTimer = undefined;\n'
-            '    terminalOutputGuard = undefined;\n'
-            '    // Extension UI state\n    extensionSelector = undefined;'
-        )
-    if 'capturedTerminalLogNextId = 1;' not in text:
-        text = text.replace('    capturedTerminalLogs = [];\n    capturedTerminalLogComponent = undefined;\n    capturedTerminalLogPartials = new Map();', '    capturedTerminalLogs = [];\n    capturedTerminalLogNextId = 1;\n    capturedTerminalLogComponent = undefined;\n    capturedTerminalLogHitRegions = [];\n    capturedTerminalLogPartials = new Map();')
-    if 'this.terminalLogContainer = new Container();' not in text:
-        text = text.replace('        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.statusContainer = new Container();', '        this.chatContainer = new Container();\n        this.pendingMessagesContainer = new Container();\n        this.terminalLogContainer = new Container();\n        this.statusContainer = new Container();')
-    text = text.replace(
-        '        ], [\n            this.statusContainer,\n            this.widgetContainerAbove,',
-        '        ], [\n            this.terminalLogContainer,\n            this.statusContainer,\n            this.widgetContainerAbove,'
-    )
-    if 'this.installTerminalOutputGuard();\n        this.ui.start();' not in text:
-        text = text.replace('        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.ui.start();', '        // Start the UI before initializing extensions so session_start handlers can use interactive dialogs\n        this.installTerminalOutputGuard();\n        this.ui.start();')
-    if 'this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));' not in text:
-        text = text.replace('        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));', '        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));\n        this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));')
-    if 'this.uninstallTerminalOutputGuard();\n            this.ui.stop();' not in text:
-        text = text.replace('            // Stop TUI to release terminal\n            this.ui.stop();', '            // Stop TUI to release terminal\n            this.uninstallTerminalOutputGuard();\n            this.ui.stop();')
-    if 'this.installTerminalOutputGuard();\n            this.ui.start();' not in text:
-        text = text.replace('            // Restart TUI\n            this.ui.start();', '            // Restart TUI\n            this.installTerminalOutputGuard();\n            this.ui.start();')
-    if 'this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");' not in text:
-        text = text.replace('        console.error("pi exiting due to uncaughtException:");', '        this.uninstallTerminalOutputGuard({ render: false });\n        console.error("pi exiting due to uncaughtException:");')
-    if 'installTerminalOutputGuard() {' in text:
-        guard_start = text.index('    installTerminalOutputGuard() {')
-        guard_end = text.index('    showNewVersionNotification(release) {', guard_start)
-        text = text[:guard_start] + TERMINAL_LOG_GUARD_METHODS + text[guard_end:]
-    else:
-        text = text.replace(
-            '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n    showNewVersionNotification(release) {',
-            '    showWarning(warningMessage) {\n        this.chatContainer.addChild(new Spacer(1));\n        this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));\n        this.ui.requestRender();\n    }\n'
-            + TERMINAL_LOG_GUARD_METHODS
-            + '    showNewVersionNotification(release) {'
-        )
-    if 'this.uninstallTerminalOutputGuard();\n        if (this.settingsManager.getShowTerminalProgress()) {' not in text:
-        text = text.replace('        if (this.settingsManager.getShowTerminalProgress()) {\n            this.ui.terminal.setProgress(false);', '        this.uninstallTerminalOutputGuard();\n        if (this.settingsManager.getShowTerminalProgress()) {\n            this.ui.terminal.setProgress(false);')
-    return text
-
 
 def backup(path: Path, patched_marker: str = "") -> None:
     if not path.exists():
@@ -818,12 +176,10 @@ def backup(path: Path, patched_marker: str = "") -> None:
 
 # Markers that only appear in *patched* files, used to locate clean source.
 CLEAN_MARKERS = {
-    "INTERACTIVE": "class FixedBottomScrollLayout",
+    "INTERACTIVE": "pendingClipboardImages = [];",
     "CLIPBOARD_IMAGE": "readClipboardImageViaMacOsFileUrl",
     "FOOTER": "renderMainStatusLine",
     "CUSTOM_EDITOR": "setTopBorderProvider",
-    "TERMINAL": "Enable button-event mouse tracking",
-    "TUI_JS": "[pi-local-mods] overlay full-redraw on appended content",
     "TUI_UTILS": "[pi-local-mods] Match Ghostty's cell advance",
     "LEAN_CTX_INDEX": "[pi-local-mods] Bind all session-scoped work to ctx.cwd",
     "LEAN_CTX_MCP_BRIDGE": "[pi-local-mods] Pin the MCP child to the active session cwd",
@@ -1281,55 +637,80 @@ def patch_clipboard_image_attachments(text: str) -> str:
 
 def patch_interactive() -> None:
     backup(INTERACTIVE, CLEAN_MARKERS["INTERACTIVE"])
-    text = INTERACTIVE.read_text()
-    text = text.replace(
-        'TUI, visibleWidth, } from "@earendil-works/pi-tui";',
-        'TUI, visibleWidth, sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";',
-    )
-    text = text.replace(
-        'TUI, visibleWidth, sliceByColumn, } from "@earendil-works/pi-tui";',
-        'TUI, visibleWidth, sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";',
-    )
-    if 'sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";' not in text:
-        raise SystemExit("Could not patch pi-tui import in interactive-mode.js")
+    text = clean_source(INTERACTIVE, CLEAN_MARKERS["INTERACTIVE"]).read_text()
+    import_suffix = '} from "@earendil-works/pi-tui";'
+    import_lines = [
+        line for line in text.splitlines()
+        if line.startswith("import {") and import_suffix in line
+    ]
+    if len(import_lines) != 1:
+        raise SystemExit(
+            "Could not find the named pi-tui import in interactive-mode.js"
+        )
+    import_line = import_lines[0]
+    for name in ("truncateToWidth",):
+        if name not in import_line:
+            import_line = import_line.replace(import_suffix, f"{name}, {import_suffix}")
+    text = text.replace(import_lines[0], import_line, 1)
+
+    if "openUrl: options.openUrl ?? openBrowser," not in text:
+        text = text.replace(
+            "            openUrl: openBrowser,",
+            "            openUrl: options.openUrl ?? openBrowser,",
+            1,
+        )
+    prompt_url_callback = "            openUrl: (url) => this.handleInteractiveUrl(url),\n"
+    if prompt_url_callback not in text:
+        callback_anchor = "            onRightClickPaste: this.onRightClickPaste,\n"
+        if text.count(callback_anchor) != 2:
+            raise SystemExit("Could not anchor fullscreen prompt-navigation URL callbacks")
+        text = text.replace(callback_anchor, callback_anchor + prompt_url_callback)
+    if "    promptNavigationTopBar =" not in text:
+        text = text.replace(
+            "    transcriptScrollView;\n    fullscreenLayoutRoot;",
+            "    transcriptScrollView;\n"
+            "    promptNavigationStateCache = undefined;\n"
+            "    promptNavigationTopBar = {\n"
+            "        render: (width) => this.renderPromptNavigationBar(-1, width, true),\n"
+            "        invalidate: () => { this.promptNavigationStateCache = undefined; },\n"
+            "    };\n"
+            "    promptNavigationBottomBar = {\n"
+            "        render: (width) => this.renderPromptNavigationBar(1, width),\n"
+            "        invalidate: () => { this.promptNavigationStateCache = undefined; },\n"
+            "    };\n"
+            "    fullscreenLayoutRoot;",
+            1,
+        )
+    if "    getPromptNavigationState(" in text:
+        start = text.index("    getPromptNavigationState(")
+        end = text.index("    mountInteractiveTui(tui, components) {", start)
+        text = text[:start] + PROMPT_NAVIGATION_METHODS + text[end:]
+    else:
+        text = text.replace(
+            "    mountInteractiveTui(tui, components) {",
+            PROMPT_NAVIGATION_METHODS + "    mountInteractiveTui(tui, components) {",
+            1,
+        )
+    native_fullscreen_layout = '''        this.fullscreenLayoutRoot = new TuiLayouts.VStack([
+            { component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+            { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+        ]);'''
+    prompt_navigation_layout = '''        const transcriptFrame = new TuiLayouts.VStack([
+            { component: this.promptNavigationTopBar, basis: "auto", grow: 0, shrink: 0, minSize: 0 },
+            { component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+            { component: this.promptNavigationBottomBar, basis: "auto", grow: 0, shrink: 0, minSize: 0 },
+        ]);
+        this.fullscreenLayoutRoot = new TuiLayouts.VStack([
+            { component: transcriptFrame, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+            { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+        ]);'''
+    if native_fullscreen_layout in text:
+        text = text.replace(native_fullscreen_layout, prompt_navigation_layout, 1)
+    elif prompt_navigation_layout not in text:
+        raise SystemExit("Could not anchor native fullscreen layout for prompt-navigation bars")
 
     text = patch_clipboard_image_attachments(text)
 
-    # Pi <=0.80 already had our layout class in the patched file; Pi 0.81 no
-    # longer has it after upgrades. Replace it when present, otherwise insert it
-    # before the first helper after InteractiveMode's top-level declarations.
-    if "class FixedBottomScrollLayout {" in text:
-        start = text.index("class FixedBottomScrollLayout {")
-        end = text.index("\nfunction isCustomSessionEntry", start)
-        text = text[:start] + FIXED_BOTTOM_SCROLL_LAYOUT + text[end:]
-    else:
-        marker = "function isCustomSessionEntry"
-        if marker not in text:
-            raise SystemExit("Could not find insertion point for FixedBottomScrollLayout")
-        text = text.replace(marker, FIXED_BOTTOM_SCROLL_LAYOUT + "\n" + marker, 1)
-
-    text = patch_terminal_log_guard(text)
-
-    if "    fixedLayout;" not in text:
-        text = text.replace(
-            "    terminalLogContainer;\n    statusContainer;",
-            "    terminalLogContainer;\n    statusContainer;\n    fixedLayout;",
-        )
-    fixed_layout_assignment = (
-        "        this.fixedLayout = new FixedBottomScrollLayout(this.ui, [\n"
-        "            this.headerContainer,\n"
-        "            this.loadedResourcesContainer,\n"
-        "            this.chatContainer,\n"
-        "        ], [\n"
-        "            this.pendingMessagesContainer,\n"
-        "            this.terminalLogContainer,\n"
-        "            this.statusContainer,\n"
-        "            this.widgetContainerAbove,\n"
-        "            this.editorContainer,\n"
-        "            this.widgetContainerBelow,\n"
-        "            this.footer,\n"
-        "        ]);"
-    )
     status_border_assignment = (
         "        this.footer.setMainLineVisible?.(false);\n"
         "        this.defaultEditor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? \"\");\n"
@@ -1369,21 +750,6 @@ def patch_interactive() -> None:
             "        this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");",
             1,
         )
-    if "this.fixedLayout = new FixedBottomScrollLayout(" not in text:
-        text = text.replace(
-            status_border_assignment,
-            status_border_assignment + "\n" + fixed_layout_assignment,
-            1,
-        )
-    # A previous buggy local patch inserted the layout assignment into
-    # applyRuntimeSettings() too. Keep the constructor assignment only.
-    text = text.replace(
-        "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
-        + fixed_layout_assignment
-        + "\n        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
-        "        this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);\n"
-        "        this.footerDataProvider.setCwd(this.sessionManager.getCwd());",
-    )
     custom_editor_border_assignment = (
         '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");\n'
         '        this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");'
@@ -1400,31 +766,6 @@ def patch_interactive() -> None:
             '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");',
             '        this.editor.setTopBorderProvider?.((width) => this.footer.renderMainStatusLine?.(width) ?? "");\n'
             '        this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
-            1,
-        )
-    old_children = '''        this.ui.addChild(this.headerContainer);
-        this.ui.addChild(this.loadedResourcesContainer);
-        this.ui.addChild(this.chatContainer);
-        this.ui.addChild(this.pendingMessagesContainer);
-        this.ui.addChild(this.statusContainer);
-        this.renderWidgets(); // Initialize with default spacer
-        this.ui.addChild(this.widgetContainerAbove);
-        this.ui.addChild(this.editorContainer);
-        this.ui.addChild(this.widgetContainerBelow);
-        this.ui.addChild(this.footer);'''
-    if old_children in text:
-        text = text.replace(
-            old_children,
-            '''        this.ui.addChild(this.fixedLayout);
-        this.renderWidgets(); // Initialize with default spacer''',
-            1,
-        )
-    if "this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));" not in text:
-        text = text.replace(
-            "        this.setupEditorSubmitHandler();",
-            "        this.setupEditorSubmitHandler();\n"
-            "        this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));\n"
-            "        this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));",
             1,
         )
     bottom_status_methods = r'''    stripStatusAnsi(text) {
@@ -1641,79 +982,6 @@ def patch_interactive() -> None:
 '''
     if "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {" in text:
         text = replace_js_method(text, "    renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {", new_render_widget_container.rstrip("\n"))
-    # Anchor the top visible transcript line when toggling tool-output
-    # expansion (ctrl+o). Without this, expanding/collapsing a tool result
-    # while scrolled up in history shifts the viewport. preserveScrollAnchor
-    # is defined on FixedBottomScrollLayout but had no call site here.
-    set_tools_expanded_native = (
-        '    setToolsExpanded(expanded) {\n'
-        '        this.toolOutputExpanded = expanded;\n'
-        '        const activeHeader = this.customHeader ?? this.builtInHeader;\n'
-        '        if (isExpandable(activeHeader)) {\n'
-        '            activeHeader.setExpanded(expanded);\n'
-        '        }\n'
-        '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {\n'
-        '            for (const child of container.children) {\n'
-        '                if (isExpandable(child)) {\n'
-        '                    child.setExpanded(expanded);\n'
-        '                }\n'
-        '            }\n'
-        '        }\n'
-        '        this.ui.requestRender();\n'
-        '    }'
-    )
-    set_tools_expanded_anchored = (
-        '    setToolsExpanded(expanded) {\n'
-        '        this.toolOutputExpanded = expanded;\n'
-        '        const applyExpansion = () => {\n'
-        '            const activeHeader = this.customHeader ?? this.builtInHeader;\n'
-        '            if (isExpandable(activeHeader)) {\n'
-        '                activeHeader.setExpanded(expanded);\n'
-        '            }\n'
-        '            for (const container of [this.loadedResourcesContainer, this.chatContainer]) {\n'
-        '                for (const child of container.children) {\n'
-        '                    if (isExpandable(child)) {\n'
-        '                        child.setExpanded(expanded);\n'
-        '                    }\n'
-        '                }\n'
-        '            }\n'
-        '        };\n'
-        '        // Keep the first visible transcript line anchored so toggling\n'
-        '        // tool output (ctrl+o) does not shift the scroll position.\n'
-        '        if (this.fixedLayout?.preserveScrollAnchor) {\n'
-        '            this.fixedLayout.preserveScrollAnchor(applyExpansion);\n'
-        '        }\n'
-        '        else {\n'
-        '            applyExpansion();\n'
-        '            this.ui.requestRender();\n'
-        '        }\n'
-        '    }'
-    )
-    # Pi 0.83 replaced the final requestRender() with a visible status message.
-    # Keep that upstream behavior while applying the same scroll anchoring.
-    set_tools_expanded_native_with_status = set_tools_expanded_native.replace(
-        '        this.ui.requestRender();\n',
-        '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);\n',
-    )
-    set_tools_expanded_anchored_with_status = set_tools_expanded_anchored.replace(
-        '            this.ui.requestRender();\n        }\n    }',
-        '            this.ui.requestRender();\n        }\n'
-        '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);\n'
-        '    }',
-    )
-    if set_tools_expanded_anchored_with_status not in text:
-        if set_tools_expanded_anchored in text:
-            # Migrate a previously patched 0.83 install that was produced before
-            # the upstream status-message variant was recognized.
-            clean_interactive = clean_source(INTERACTIVE, CLEAN_MARKERS["INTERACTIVE"]).read_text()
-            if set_tools_expanded_native_with_status in clean_interactive:
-                text = text.replace(set_tools_expanded_anchored, set_tools_expanded_anchored_with_status, 1)
-        elif set_tools_expanded_native_with_status in text:
-            text = text.replace(set_tools_expanded_native_with_status, set_tools_expanded_anchored_with_status, 1)
-        elif set_tools_expanded_native in text:
-            text = text.replace(set_tools_expanded_native, set_tools_expanded_anchored, 1)
-        else:
-            raise SystemExit("Could not find native setToolsExpanded to anchor ctrl+o scroll position")
     # Expose handleHotkeysCommand to extension shortcut handlers so a shortcut
     # (e.g. Ctrl+?) can render the keyboard-shortcuts panel directly. Without
     # this, sendUserMessage("/hotkeys") goes to the model instead of the command.
@@ -1725,6 +993,18 @@ def patch_interactive() -> None:
         text = text.replace(_ctx_anchor, _showhotkeys_line + _ctx_anchor, 1)
     required_interactive = [
         'showHotkeys: () => this.handleHotkeysCommand(),',
+        'getPromptNavigationState(width, refresh = false)',
+        'renderPromptNavigationBar(direction, width, refresh = false)',
+        'promptNavigationStateCache = undefined',
+        'navigatePromptBar(direction)',
+        'handleInteractiveUrl(url)',
+        'pi://prompt-navigation/previous',
+        'pi://prompt-navigation/next',
+        'Symbol.for("pi-local-mods.action-handlers")',
+        'url.startsWith("pi-local://")',
+        'component: this.promptNavigationTopBar',
+        'component: this.promptNavigationBottomBar',
+        'openUrl: (url) => this.handleInteractiveUrl(url)',
         'bottomBorderWidgetStatus = "";',
         'bottomBorderWidgetLimits = "";',
         'compactLeanCtxStatus(text)',
@@ -1739,21 +1019,6 @@ def patch_interactive() -> None:
         'The editor bottom-border provider owns this widget.',
         'this.defaultEditor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
         'this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? "");',
-        'const applyExpansion = () => {',
-        'this.fixedLayout.preserveScrollAnchor(applyExpansion);',
-        'renderScrollLinesWithSpans(width)',
-        'firstMeaningfulLine(childLines)',
-        'grandChild instanceof UserMessageComponent',
-        'findPreviousMessage(this.messageSpans, viewportTopContentLine)',
-        'findNextMessage(this.messageSpans, nextThreshold)',
-        'const aboveCount = start;',
-        'const belowCount = this.scrollOffset;',
-        'theme.fg("warning", belowTag)',
-        'this.topMessageTarget = prev.start;',
-        'this.bottomMessageTarget = next.start;',
-        'row === this.lastBottomBarRow',
-        'scrollToMessageStart(this.topMessageTarget)',
-        'this.chatContainer = chatContainer ?? scrollChildren[2];',
     ]
     missing_interactive = [needle for needle in required_interactive if needle not in text]
     if missing_interactive:
@@ -2120,23 +1385,6 @@ def patch_custom_editor() -> None:
         raise SystemExit(f"Could not apply custom editor border patch: missing {missing}")
     CUSTOM_EDITOR.write_text(text)
 
-def patch_terminal() -> None:
-    backup(TERMINAL, CLEAN_MARKERS["TERMINAL"])
-    text = TERMINAL.read_text()
-    # Normalize any previous mouse-mode patch back to our desired mode.
-    text = text.replace('process.stdout.write("\\x1b[?1000h\\x1b[?1006h");', 'process.stdout.write("\\x1b[?1002h\\x1b[?1006h");')
-    text = text.replace('process.stdout.write("\\x1b[?1000l\\x1b[?1006l");', 'process.stdout.write("\\x1b[?1002l\\x1b[?1006l");')
-    if 'process.stdout.write("\\x1b[?1002h\\x1b[?1006h");' not in text:
-        needle = '        // Enable bracketed paste mode - terminal will wrap pastes in \\x1b[200~ ... \\x1b[201~\n        process.stdout.write("\\x1b[?2004h");'
-        repl = needle + '\n        // Enable button-event mouse tracking with SGR encoding for wheel /\n        // trackpad scroll gestures and app-owned transcript selection.\n        process.stdout.write("\\x1b[?1002h\\x1b[?1006h");'
-        text = text.replace(needle, repl)
-    if 'process.stdout.write("\\x1b[?1002l\\x1b[?1006l");' not in text:
-        needle = '        // Disable bracketed paste mode\n        process.stdout.write("\\x1b[?2004l");'
-        repl = '        // Disable mouse tracking and bracketed paste mode\n        process.stdout.write("\\x1b[?1002l\\x1b[?1006l");\n        process.stdout.write("\\x1b[?2004l");'
-        text = text.replace(needle, repl)
-    TERMINAL.write_text(text)
-
-
 def patch_tui_unicode_width() -> None:
     """Measure non-emoji graphemes by normalized printable codepoint widths."""
     marker = CLEAN_MARKERS["TUI_UTILS"]
@@ -2147,33 +1395,22 @@ def patch_tui_unicode_width() -> None:
     if text.count(zero_width_needle) != 1:
         raise SystemExit("Could not anchor pi-tui zero-width mark classification")
     text = text.replace(zero_width_needle, zero_width_replacement, 1)
-    needle = '''    // Get base visible codepoint
-    const base = segment.replace(leadingNonPrintingRegex, "");
-    const cp = base.codePointAt(0);
-    if (cp === undefined) {
+    signature = "function graphemeWidth(segment) {"
+    if text.count(signature) != 1:
+        raise SystemExit("Could not anchor pi-tui grapheme width patch")
+    replacement = '''function graphemeWidth(segment) {
+    if (segment === "\\t") {
+        return 3;
+    }
+    // Zero-width clusters
+    if (zeroWidthRegex.test(segment)) {
         return 0;
     }
-    // Regional indicator symbols (U+1F1E6..U+1F1FF) are often rendered as
-    // full-width emoji in terminals, even when isolated during streaming.
-    // Keep width conservative (2) to avoid terminal auto-wrap drift artifacts.
-    if (cp >= 0x1f1e6 && cp <= 0x1f1ff) {
+    // Emoji check with pre-filter
+    if (couldBeEmoji(segment) && rgiEmojiRegex.test(segment)) {
         return 2;
     }
-    let width = eastAsianWidth(cp);
-    // Trailing halfwidth/fullwidth forms and AM vowels that segment with a base.
-    if (segment.length > 1) {
-        for (const char of segment.slice(1)) {
-            const c = char.codePointAt(0);
-            if (c >= 0xff00 && c <= 0xffef) {
-                width += eastAsianWidth(c);
-            }
-            else if (c === 0x0e33 || c === 0x0eb3) {
-                width += 1;
-            }
-        }
-    }
-    return width;'''
-    replacement = '''    // [pi-local-mods] Match Ghostty's cell advance for complex graphemes.
+    // [pi-local-mods] Match Ghostty's cell advance for complex graphemes.
     // NFC first composes Hangul and ordinary base+mark sequences. For every
     // remaining non-emoji cluster, sum all printable codepoints rather than only
     // the first base. Unicode spacing marks advance a cell in Ghostty, while
@@ -2190,43 +1427,10 @@ def patch_tui_unicode_width() -> None:
         else
             width += eastAsianWidth(cp);
     }
-    return Math.min(width, 2);'''
-    if text.count(needle) != 1:
-        raise SystemExit("Could not anchor pi-tui grapheme width patch")
-    text = text.replace(needle, replacement, 1)
+    return Math.min(width, 2);
+}'''
+    text = replace_js_method(text, signature, replacement)
     TUI_UTILS.write_text(text)
-
-
-def patch_tui_overlay_scroll() -> None:
-    """Force a clean full repaint when a visible overlay participates in a changed frame.
-
-    pi-tui's differential writer only repaints changed lines in the composited
-    frame. Screen-fixed overlays (e.g. the pi-subagents fleet inspector) can be
-    corrupted both when chat content behind them appends and when the overlay
-    panel itself changes. In either case, repainting only the changed slice can
-    leave stale overlay rows/cells behind because the terminal state is not the
-    same as the composited in-memory frame. Re-deriving the whole frame from the
-    in-memory buffer also rebuilds scrollback, so no chat history is lost.
-    """
-    marker = CLEAN_MARKERS["TUI_JS"]
-    backup(TUI_JS, marker)
-    text = clean_source(TUI_JS, marker).read_text()
-    needle = "        const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;\n"
-    guard = (
-        needle
-        + "        // " + marker + "\n"
-        + "        // Overlays are screen-fixed; any changed composited overlay frame\n"
-        + "        // can leave stale rows/cells behind under the differential writer.\n"
-        + "        if (firstChanged !== -1 && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {\n"
-        + "            logRedraw(\"overlay active + changed frame\");\n"
-        + "            fullRender(true);\n"
-        + "            return;\n"
-        + "        }\n"
-    )
-    if needle not in text:
-        raise SystemExit("Could not anchor TUI overlay-scroll patch (appendStart line not found)")
-    text = text.replace(needle, guard, 1)
-    TUI_JS.write_text(text)
 
 
 def patch_lean_ctx_session_cwd() -> None:
@@ -2635,15 +1839,17 @@ def install_theme() -> None:
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
-def install_quota_dashboard() -> None:
-    if not QUOTA_DASHBOARD_SRC.exists():
-        raise SystemExit(f"quota-dashboard source missing: {QUOTA_DASHBOARD_SRC}")
-    QUOTA_DASHBOARD_DST.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(QUOTA_DASHBOARD_SRC, QUOTA_DASHBOARD_DST)
+def install_extensions() -> None:
+    extension_dir = PI_AGENT_DIR / "extensions"
+    extension_dir.mkdir(parents=True, exist_ok=True)
+    for source in EXTENSION_SOURCES:
+        if not source.exists():
+            raise SystemExit(f"extension source missing: {source}")
+        shutil.copy2(source, extension_dir / source.name)
 
 
 def verify() -> None:
-    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TERMINAL, TUI_JS, TUI_UTILS]
+    paths = [INTERACTIVE, CLIPBOARD_IMAGE, FOOTER, CUSTOM_EDITOR, TUI_UTILS]
     if LEAN_CTX_PACKAGE.exists():
         paths.extend([LEAN_CTX_INDEX, LEAN_CTX_MCP_BRIDGE])
     for path in paths:
@@ -2656,13 +1862,11 @@ def main() -> None:
     patch_clipboard_image()
     patch_footer_component()
     patch_custom_editor()
-    patch_terminal()
     patch_tui_unicode_width()
-    patch_tui_overlay_scroll()
     patch_lean_ctx_session_cwd()
     patch_bg_tasks_shortcuts()
     install_theme()
-    install_quota_dashboard()
+    install_extensions()
     verify()
     print("Applied pi-local-mods. Restart pi to use the patched runtime.")
 

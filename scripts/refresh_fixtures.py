@@ -33,8 +33,7 @@ TARGETS = [
     ("FOOTER", "pi/dist/modes/interactive/components/footer.js"),
     ("CUSTOM_EDITOR", "pi/dist/modes/interactive/components/custom-editor.js"),
     ("CLIPBOARD_IMAGE", "pi/dist/utils/clipboard-image.js"),
-    ("TERMINAL", "pi/node_modules/@earendil-works/pi-tui/dist/terminal.js"),
-    ("TUI_JS", "pi/node_modules/@earendil-works/pi-tui/dist/tui.js"),
+    ("TUI_UTILS", "pi/node_modules/@earendil-works/pi-tui/dist/utils.js"),
 ]
 
 

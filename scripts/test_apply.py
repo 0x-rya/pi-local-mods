@@ -60,7 +60,9 @@ class ApplyPatchResultTests(unittest.TestCase):
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
         source_text = source.read_text()
         self.assertNotIn("class FixedBottomScrollLayout {", source_text)
-        self.assertIn("this.ui.addChild(this.chatContainer);", source_text)
+        self.assertNotIn("pi://prompt-navigation/", source_text)
+        self.assertIn("new TuiLayouts.ScrollView", source_text)
+        self.assertIn("this.fullscreenLayoutRoot", source_text)
         interactive = self.copy_fixture(
             source,
             "pi/dist/modes/interactive/interactive-mode.js",
@@ -70,14 +72,29 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.mod.patch_interactive()
         text = interactive.read_text()
 
-        self.assertIn('sliceByColumn, truncateToWidth, } from "@earendil-works/pi-tui";', text)
-        self.assertIn("class FixedBottomScrollLayout {", text)
-        self.assertIn("this.fixedLayout = new FixedBottomScrollLayout(this.ui", text)
-        self.assertEqual(text.count("this.fixedLayout = new FixedBottomScrollLayout(this.ui"), 1)
-        self.assertIn("this.ui.addChild(this.fixedLayout);", text)
-        self.assertNotIn("this.ui.addChild(this.chatContainer);", text)
-        self.assertIn("this.ui.addInputListener((data) => this.fixedLayout?.handleInput(data));", text)
-        self.assertIn("this.ui.addInputListener((data) => this.handleCapturedTerminalLogInput(data));", text)
+        self.assertNotIn("sliceByColumn", text)
+        self.assertIn("truncateToWidth", text)
+        self.assertNotIn("class FixedBottomScrollLayout {", text)
+        self.assertNotIn("fixedLayout", text)
+        # Pi 0.84 owns transcript scrolling, selection, anchoring, and the sticky
+        # dock through its fullscreen viewport. Keep that native tree intact.
+        self.assertIn("new TuiLayouts.ScrollView", text)
+        self.assertIn("this.fullscreenLayoutRoot", text)
+        self.assertIn("getPromptNavigationState(width, refresh = false)", text)
+        self.assertIn("renderPromptNavigationBar(direction, width, refresh = false)", text)
+        self.assertIn("promptNavigationStateCache = undefined", text)
+        self.assertIn("this.getPromptNavigationState(width, true)", text)
+        self.assertIn("child instanceof UserMessageComponent", text)
+        self.assertIn('hyperlink(line, `pi://prompt-navigation/${destination}`)', text)
+        self.assertIn('url === "pi://prompt-navigation/previous"', text)
+        self.assertIn('url === "pi://prompt-navigation/next"', text)
+        self.assertIn("this.transcriptScrollView.scrollTo(target.start);", text)
+        self.assertIn("component: this.promptNavigationTopBar", text)
+        self.assertIn("component: this.promptNavigationBottomBar", text)
+        self.assertEqual(text.count("openUrl: (url) => this.handleInteractiveUrl(url),"), 2)
+        self.assertIn('Symbol.for("pi-local-mods.action-handlers")', text)
+        self.assertIn('url.startsWith("pi-local://")', text)
+        self.assertNotIn("handleCapturedTerminalLogInput", text)
         self.assertIn("bottomBorderWidgetStatus = \"\";", text)
         self.assertIn("bottomBorderWidgetLimits = \"\";", text)
         self.assertIn("compactLeanCtxStatus(text)", text)
@@ -85,27 +102,6 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("refreshBottomBorderWidgetStatus(width)", text)
         self.assertIn("renderBottomBorderWidgetStatusLine(width)", text)
         self.assertIn("moveBottomWidgetStatusToEditorBorder(lines)", text)
-        # ctrl+o (toggle tool output) must anchor the top visible transcript
-        # line instead of letting the viewport jump.
-        self.assertIn("const applyExpansion = () => {", text)
-        self.assertIn("this.fixedLayout.preserveScrollAnchor(applyExpansion);", text)
-        self.assertEqual(text.count("this.fixedLayout.preserveScrollAnchor(applyExpansion);"), 1)
-        self.assertIn('this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);', text)
-        self.assertEqual(text.count('this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);'), 1)
-        # Pinned "previous message" jump bar at the top of the transcript.
-        self.assertIn("renderScrollLinesWithSpans(width)", text)
-        self.assertIn("firstMeaningfulLine(childLines)", text)
-        self.assertIn("grandChild instanceof UserMessageComponent", text)
-        self.assertIn("findPreviousMessage(this.messageSpans, viewportTopContentLine)", text)
-        self.assertIn("findNextMessage(this.messageSpans, nextThreshold)", text)
-        self.assertIn("const aboveCount = start;", text)
-        self.assertIn("const belowCount = this.scrollOffset;", text)
-        self.assertIn('theme.fg("warning", belowTag)', text)
-        self.assertIn("this.topMessageTarget = prev.start;", text)
-        self.assertIn("this.bottomMessageTarget = next.start;", text)
-        self.assertIn("row === this.lastBottomBarRow", text)
-        self.assertIn("scrollToMessageStart(this.topMessageTarget)", text)
-        self.assertIn("this.chatContainer = chatContainer ?? scrollChildren[2];", text)
         self.assertIn("const trimmedPlain = plain.trimStart();", text)
         self.assertIn("/^Limits\\s*[|│]/", text)
         self.assertIn("/^\\s*Limits\\s*[|│]\\s*/", text)
@@ -119,11 +115,9 @@ class ApplyPatchResultTests(unittest.TestCase):
         self.assertIn("this.editor.setBottomBorderProvider?.((width) => this.renderBottomBorderWidgetStatusLine?.(width) ?? \"\");", text)
         self.assertNotIn("setBottomBorderProvider?.((width) => this.footer.renderExtensionStatusLine?.(width)", text)
         self.assertNotIn("setBottomBorderProvider?.((width) => this.footer.renderExtensionStatusBorderLine?.(width)", text)
-        self.assertIn("installTerminalOutputGuard()", text)
-        self.assertIn("terminalLogContainer;", text)
-        self.assertIn("capturedTerminalLogHitRegions.push({ type: \"copy\"", text)
-        self.assertIn("const priority = { copy: 0, close: 1, clear: 1, toggle: 2 };", text)
-        self.assertIn("capturedTerminalLogHitRegions.push({ type: \"toggle\", id: entry.id, row, startCol: 0", text)
+        self.assertNotIn("installTerminalOutputGuard()", text)
+        self.assertNotIn("terminalLogContainer;", text)
+        self.assertNotIn("capturedTerminalLogHitRegions", text)
         self.assertIn("const submission = await this.prepareClipboardImageSubmission(text);", text)
         self.assertNotIn("const submission = this.prepareClipboardImageSubmission(text);", text)
         # Dropped macOS screenshot paths can contain shell-escaped Unicode
@@ -159,6 +153,77 @@ if (!normalized.includes("1.42.46 PM.png")) throw new Error(`Unicode screensho
         self.assertEqual(reapplied.count("    stripStatusAnsi(text) {"), 1)
         self.assertEqual(reapplied.count("    coalesceQuotaDashboardLines(lines) {"), 1)
         self.assertEqual(reapplied.count("    renderBottomBorderWidgetStatusLine(width) {"), 1)
+
+    def test_prompt_navigation_bar_behavior(self) -> None:
+        methods = self.mod.PROMPT_NAVIGATION_METHODS
+        script = r'''
+const strip = (text) => text
+  .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+  .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+const visibleWidth = (text) => [...strip(text)].length;
+const truncateToWidth = (text, width) => [...text].slice(0, Math.max(0, width)).join("");
+const hyperlink = (text, url) => `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
+const theme = { fg: (_color, text) => text };
+let openedUrl;
+const openBrowser = (url) => { openedUrl = url; };
+let childRenderCount = 0;
+class UserMessageComponent {
+  constructor(text, height = 1) { this.text = text; this.height = height; }
+  render() {
+    childRenderCount++;
+    return [`\x1b]133;A\x07\x1b[36m${this.text}\x1b[0m`, ...Array(this.height - 1).fill("detail")];
+  }
+}
+class OtherComponent {
+  constructor(height) { this.height = height; }
+  render() { childRenderCount++; return Array(this.height).fill("other"); }
+}
+class Harness {
+  constructor() {
+    this.headerContainer = { render: () => ["header"] };
+    this.loadedResourcesContainer = { render: () => ["resources"] };
+    this.chatContainer = { children: [
+      new UserMessageComponent("first prompt", 2),
+      new OtherComponent(3),
+      new UserMessageComponent("middle prompt", 2),
+      new OtherComponent(4),
+      new UserMessageComponent("last prompt", 2),
+    ] };
+    this.transcriptScrollView = {
+      scrollTop: 5,
+      viewportHeight: 5,
+      getContentWidth: (width) => width,
+      scrollTo: (row) => { this.transcriptScrollView.scrollTop = row; },
+    };
+    this.ui = { terminal: { columns: 80 }, requestRender: () => { this.renderRequests++; } };
+    this.renderRequests = 0;
+  }
+''' + methods + r'''}
+const harness = new Harness();
+const state = harness.getPromptNavigationState(80);
+if (state.previous?.preview !== "first prompt") throw new Error(`wrong previous: ${state.previous?.preview}`);
+if (state.next?.preview !== "last prompt") throw new Error(`wrong next: ${state.next?.preview}`);
+const top = harness.renderPromptNavigationBar(-1, 80, true)[0] ?? "";
+const rendersAfterTop = childRenderCount;
+const bottom = harness.renderPromptNavigationBar(1, 80)[0] ?? "";
+if (childRenderCount !== rendersAfterTop) throw new Error("bottom bar did not reuse prompt state");
+if (!top.includes("pi://prompt-navigation/previous") || !top.includes("first prompt")) throw new Error("bad top bar");
+if (!bottom.includes("pi://prompt-navigation/next") || !bottom.includes("last prompt")) throw new Error("bad bottom bar");
+harness.navigatePromptBar(-1);
+if (harness.transcriptScrollView.scrollTop !== 2) throw new Error("previous bar navigated to wrong row");
+harness.transcriptScrollView.scrollTop = 5;
+harness.handleInteractiveUrl("pi://prompt-navigation/next");
+if (harness.transcriptScrollView.scrollTop !== 13) throw new Error("next bar navigated to wrong row");
+harness.handleInteractiveUrl("https://example.com");
+if (openedUrl !== "https://example.com") throw new Error("ordinary URL was not delegated");
+let localAction;
+globalThis[Symbol.for("pi-local-mods.action-handlers")] = new Map([
+  ["pi-local://test/", (url) => { localAction = url; return true; }],
+]);
+harness.handleInteractiveUrl("pi-local://test/run");
+if (localAction !== "pi-local://test/run") throw new Error("local action URL was not dispatched");
+'''
+        self.assertNodeScript(script)
 
     def test_interactive_patch_migrates_previous_status_implementation(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/interactive-mode.js"
@@ -449,27 +514,169 @@ for (const update of widgetUpdates) {{
 '''
         self.assertNodeScript(script)
 
-    def test_terminal_patch_final_result(self) -> None:
-        source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/terminal.js"
-        source_text = source.read_text()
-        self.assertNotIn("?1002h", source_text)
-        terminal = self.copy_fixture(
-            source,
-            "pi/node_modules/@earendil-works/pi-tui/dist/terminal.js",
-        )
-        self.mod.TERMINAL = terminal
+    def test_fullscreen_osc_links_dispatch_clicks(self) -> None:
+        pi_tui = self.mod.PI_PACKAGE / "node_modules/@earendil-works/pi-tui/dist/index.js"
+        if not pi_tui.exists():
+            self.skipTest("installed pi-tui is required for fullscreen click integration checks")
+        script = f'''
+import {{ hyperlink, TuiAltScreen }} from {json.dumps(pi_tui.as_uri())};
+class FakeTerminal {{
+  columns = 40;
+  rows = 5;
+  kittyProtocolActive = false;
+  input;
+  start(onInput) {{ this.input = onInput; }}
+  stop() {{}}
+  async drainInput() {{}}
+  write() {{}}
+  moveBy() {{}}
+  hideCursor() {{}}
+  showCursor() {{}}
+  clearLine() {{}}
+  clearFromCursor() {{}}
+  clearScreen() {{}}
+  setTitle() {{}}
+  setProgress() {{}}
+}}
+const terminal = new FakeTerminal();
+let opened;
+const tui = new TuiAltScreen(terminal, false, undefined, {{ openUrl: (url) => {{ opened = url; }} }});
+tui.addChild({{
+  render: () => [hyperlink("CLICK", "pi-local://terminal-logs/clear")],
+  invalidate() {{}},
+}});
+tui.start();
+tui.renderNow();
+terminal.input("\\x1b[<0;1;1M");
+terminal.input("\\x1b[<0;1;1m");
+tui.stop({{ preserveScreen: true }});
+if (opened !== "pi-local://terminal-logs/clear") throw new Error(`OSC click was not dispatched: ${{opened}}`);
+'''
+        self.assertNodeScript(script)
 
-        self.mod.patch_terminal()
-        text = terminal.read_text()
+    def test_terminal_logs_extension_lifecycle_and_click_actions(self) -> None:
+        pi_package = self.mod.PI_PACKAGE
+        pi_tui = pi_package / "node_modules/@earendil-works/pi-tui/dist/index.js"
+        jiti = pi_package / "node_modules/jiti/lib/jiti-static.mjs"
+        extension = ROOT / "extensions/terminal-logs.ts"
+        extension_text = extension.read_text()
+        self.assertIn('child.once("close", (code) => {', extension_text)
+        self.assertNotIn('child.stdin.end(`[${entry.source}] ${entry.text}`);\n    this.ctx?.ui.notify("Terminal log copied"', extension_text)
+        if not pi_tui.exists() or not jiti.exists():
+            self.skipTest("installed Pi + jiti are required for extension integration checks")
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        fake_pbcopy = fake_bin / "pbcopy"
+        fake_pbcopy.write_text("#!/bin/sh\ncat >/dev/null\n")
+        fake_pbcopy.chmod(0o755)
 
-        self.assertIn('process.stdout.write("\\x1b[?1002h\\x1b[?1006h");', text)
-        self.assertIn('process.stdout.write("\\x1b[?1002l\\x1b[?1006l");', text)
-        self.assertIn("Enable button-event mouse tracking with SGR encoding", text)
-        self.assertNodeChecks(terminal)
+        script = rf'''
+import {{ createJiti }} from {json.dumps(jiti.as_uri())};
+import {{ delimiter }} from "node:path";
+import {{ visibleWidth }} from {json.dumps(pi_tui.as_uri())};
+process.env.PATH = {json.dumps(str(fake_bin))} + delimiter + (process.env.PATH ?? "");
+const jiti = createJiti(import.meta.url, {{
+  moduleCache: false,
+  alias: {{ "@earendil-works/pi-tui": {json.dumps(str(pi_tui))} }},
+}});
+const module = await jiti.import({json.dumps(str(extension))});
+const factory = module.default;
+if (typeof factory !== "function") throw new Error("extension did not load as a factory");
+const handlers = new Map();
+const commands = new Map();
+factory({{
+  on(name, handler) {{ handlers.set(name, handler); }},
+  registerCommand(name, options) {{ commands.set(name, options); }},
+}});
+if (!handlers.has("session_start") || !handlers.has("session_shutdown")) throw new Error("lifecycle handlers missing");
+if (!commands.has("terminal-logs")) throw new Error("terminal-logs command missing");
+const failures = [];
+const check = (condition, message) => {{ if (!condition) failures.push(message); }};
+const theme = {{ fg: (_color, text) => `\x1b[36m${{text}}\x1b[0m` }};
+let component;
+let renderRequests = 0;
+let widgetSetCalls = 0;
+let widgetClearCalls = 0;
+const notices = [];
+const tui = {{ requestRender() {{ renderRequests++; }} }};
+const ctx = {{
+  mode: "tui",
+  ui: {{
+    setWidget(id, value) {{
+      check(id === "terminal-logs", "wrong widget id");
+      if (typeof value === "function") {{
+        widgetSetCalls++;
+        component = value(tui, theme);
+      }} else {{
+        widgetClearCalls++;
+        component = undefined;
+      }}
+    }},
+    notify(message, level) {{ notices.push({{ message, level }}); }},
+  }},
+}};
+const originalWarn = console.warn;
+const originalStderrWrite = process.stderr.write;
+await handlers.get("session_start")({{}}, ctx);
+check(component === undefined && widgetSetCalls === 0, "empty log widget reserved dock space");
+console.warn("clickable warning", 42);
+process.stderr.write("stderr line\n");
+process.stderr.write("partial without newline");
+await new Promise((resolve) => setTimeout(resolve, 80));
+check(component, "widget component was not installed");
+let lines = component?.render(90) ?? [];
+check(lines.some((line) => line.includes("clickable warning 42")), "console warning was not captured");
+check(lines.some((line) => line.includes("stderr line")), "stderr was not captured");
+check(lines.some((line) => line.includes("partial without newline")), "partial stderr was not flushed");
+check(widgetSetCalls === 1, "log widget was not installed lazily exactly once");
+check(lines.every((line) => visibleWidth(line) <= 90), "widget exceeded available width");
+const joined = lines.join("\\n");
+const toggle = joined.match(/pi-local:\/\/terminal-logs\/toggle\/(\d+)/)?.[0];
+check(toggle, "toggle OSC link missing");
+const registry = globalThis[Symbol.for("pi-local-mods.action-handlers")];
+const actionHandler = registry?.get("pi-local://terminal-logs/");
+check(typeof actionHandler === "function", "local action handler was not registered");
+if (toggle && actionHandler) actionHandler(toggle);
+lines = component?.render(90) ?? [];
+check(lines.some((line) => line.includes("pi-local://terminal-logs/copy/")), "expanded copy link missing");
+const copy = lines.join("\\n").match(/pi-local:\/\/terminal-logs\/copy\/(\d+)/)?.[0];
+check(copy, "copy action URL missing");
+const noticesBeforeCopy = notices.length;
+if (copy) actionHandler?.(copy);
+check(notices.length === noticesBeforeCopy, "copy reported success before pbcopy completed");
+await new Promise((resolve) => setTimeout(resolve, 300));
+check(notices.some((notice) => notice.message === "Terminal log copied" && notice.level === "info"), `successful copy was not reported: ${{JSON.stringify(notices)}}`);
+actionHandler?.("pi-local://terminal-logs/clear");
+check((component?.render(90) ?? []).length === 0, "clear action did not empty the panel");
+check(widgetClearCalls === 1, "empty panel widget was not removed");
+await handlers.get("session_shutdown")({{}}, ctx);
+check(console.warn === originalWarn, "console.warn was not restored");
+check(process.stderr.write === originalStderrWrite, "stderr.write was not restored");
+check(!registry?.has("pi-local://terminal-logs/"), "local action handler leaked after shutdown");
+check(renderRequests > 0, "state changes did not request rendering");
+if (failures.length) throw new Error(failures.join("; "));
+'''
+        self.assertNodeScript(script)
+
+    def test_install_extensions_copies_every_managed_source(self) -> None:
+        source_dir = self.root / "sources"
+        source_dir.mkdir()
+        first = source_dir / "first.ts"
+        second = source_dir / "second.ts"
+        first.write_text("export default 1;\n")
+        second.write_text("export default 2;\n")
+        self.mod.PI_AGENT_DIR = self.root / "agent"
+        self.mod.EXTENSION_SOURCES = (first, second)
+
+        self.mod.install_extensions()
+
+        extension_dir = self.mod.PI_AGENT_DIR / "extensions"
+        self.assertEqual((extension_dir / first.name).read_bytes(), first.read_bytes())
+        self.assertEqual((extension_dir / second.name).read_bytes(), second.read_bytes())
 
     def test_tui_unicode_width_patch_final_result(self) -> None:
         marker = "[pi-local-mods] Match Ghostty's cell advance"
-        source = self.mod.clean_source(self.mod.TUI_UTILS, marker)
+        source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/utils.js"
         source_text = source.read_text()
         self.assertNotIn(marker, source_text)
         utils = self.copy_fixture(source, "pi/node_modules/@earendil-works/pi-tui/dist/utils.js")
@@ -481,7 +688,6 @@ for (const update of widgetUpdates) {{
         self.assertIn(marker, text)
         self.assertIn('const normalized = segment.normalize("NFC");', text)
         self.assertIn("\\p{Nonspacing_Mark}|\\p{Enclosing_Mark}", text)
-        self.assertNotIn("|\\p{Mark}|", text)
         self.assertIn("width += eastAsianWidth(cp);", text)
         self.assertIn("return Math.min(width, 2);", text)
         self.assertNotIn("Script_Extensions=Devanagari", text)
@@ -530,47 +736,6 @@ if (mod.sliceByColumn("સેન્સર", 0, 3, true) !== "સેન્સ") t
         self.mod.patch_tui_unicode_width()
         self.assertEqual(utils.read_bytes(), first_apply)
         self.assertNotIn(marker, utils.with_suffix(utils.suffix + ".pi-local-mods.bak").read_text())
-
-    def test_tui_overlay_scroll_patch_final_result(self) -> None:
-        source = PI_FIXTURE / "node_modules/@earendil-works/pi-tui/dist/tui.js"
-        source_text = source.read_text()
-        self.assertNotIn("[pi-local-mods] overlay full-redraw", source_text)
-        self.assertIn(
-            "const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;",
-            source_text,
-        )
-        tui = self.copy_fixture(
-            source,
-            "pi/node_modules/@earendil-works/pi-tui/dist/tui.js",
-        )
-        self.mod.TUI_JS = tui
-
-        self.mod.patch_tui_overlay_scroll()
-        text = tui.read_text()
-
-        self.assertIn("[pi-local-mods] overlay full-redraw on appended content", text)
-        self.assertEqual(text.count("[pi-local-mods] overlay full-redraw on appended content"), 1)
-        self.assertIn(
-            "if (firstChanged !== -1 && this.overlayStack.some((entry) => this.isOverlayVisible(entry))) {",
-            text,
-        )
-        self.assertIn('logRedraw("overlay active + changed frame");', text)
-        # The guard must sit between the appendStart line and the "No changes"
-        # early return so it short-circuits the differential writer.
-        self.assertLess(
-            text.index("const appendStart = appendedLines"),
-            text.index("[pi-local-mods] overlay full-redraw on appended content"),
-        )
-        self.assertLess(
-            text.index("[pi-local-mods] overlay full-redraw on appended content"),
-            text.index("// No changes - but still need to update hardware cursor position if it moved"),
-        )
-        self.assertNodeChecks(tui)
-
-        # Re-applying must be a no-op (idempotent) and must not duplicate the guard.
-        first_apply = tui.read_bytes()
-        self.mod.patch_tui_overlay_scroll()
-        self.assertEqual(tui.read_bytes(), first_apply)
 
     def test_footer_patch_final_result(self) -> None:
         source = PI_FIXTURE / "dist/modes/interactive/components/footer.js"

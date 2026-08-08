@@ -2,11 +2,15 @@
 
 Reproducible local setup for the Pi coding agent and tmux.
 
-The Pi changes are intentionally **not** implemented as a Pi extension because the useful parts patch Pi internals that are not currently exposed to extensions:
+The remaining Pi changes patch internals that are not currently exposed to extensions, alongside reproducible local extensions and themes. Transcript scrolling, selection, scroll anchoring, and the sticky editor/footer now use Pi's native fullscreen TUI instead of local patches.
 
-- transcript mouse/trackpad scrolling
-- app-owned transcript selection + copy
-- scroll anchoring while streaming / expanding tool output
+Notable retained changes include:
+
+- clipboard image attachment handling
+- extension-owned captured terminal-log panel with clickable expand/copy/close/clear controls
+- quota/dashboard status integration
+- clickable previous/next prompt preview bars for fullscreen mode
+- Ghostty-compatible terminal Unicode widths
 - custom `codex-dark` theme
 
 ## Apply Pi patches
@@ -109,18 +113,11 @@ keybind = shift+enter=text:\n
 
 After applying, either reload with `prefix + r` or restart tmux. Start a new shell after enabling auto-attach.
 
-## Selection UX
+## Native fullscreen transcript UX
 
-- Wheel/trackpad scroll: scrolls transcript
-- Drag: selects transcript text inside Pi
-- `Ctrl+X`: copies Pi selection if one exists, otherwise Pi's normal copy action runs
-- `Esc`: clears Pi selection
-- Auto-copy on mouse release is **off by default**
-- Optional auto-copy:
+The applied settings use Pi's native `tuiMode: "fullscreen"`. Pi 0.84+ owns the sticky editor/footer dock, wheel and trackpad transcript scrolling, drag-to-select with automatic copy, word/paragraph selection, scroll anchoring, scrollbars, and keyboard prompt navigation. A narrow local integration adds clickable top/bottom prompt preview bars without replacing the native viewport.
 
-```bash
-PI_SELECTION_AUTO_COPY=1 pi
-```
+Terminal-log capture and rendering live in `extensions/terminal-logs.ts`. Its controls use OSC 8 action links rather than raw mouse-coordinate handling; the application patch only supplies a small generic `pi-local://` action dispatcher because fullscreen consumes mouse events before extension terminal-input listeners.
 
 ## Notes
 

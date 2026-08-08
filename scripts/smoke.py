@@ -26,11 +26,11 @@ _spec.loader.exec_module(apply)
 
 # (path attribute, patch function, clean marker)
 TARGETS = [
-    ("INTERACTIVE", "patch_interactive", "class FixedBottomScrollLayout"),
+    ("INTERACTIVE", "patch_interactive", "pendingClipboardImages = [];"),
     ("FOOTER", "patch_footer_component", "renderMainStatusLine"),
     ("CUSTOM_EDITOR", "patch_custom_editor", "setTopBorderProvider"),
     ("CLIPBOARD_IMAGE", "patch_clipboard_image", "readClipboardImageViaMacOsFileUrl"),
-    ("TERMINAL", "patch_terminal", "Enable button-event mouse tracking"),
+    ("TUI_UTILS", "patch_tui_unicode_width", "[pi-local-mods] Match Ghostty's cell advance"),
 ]
 
 
