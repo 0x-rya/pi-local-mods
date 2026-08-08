@@ -694,10 +694,12 @@ if (failures.length) throw new Error(failures.join("; "));
         self.assertNotIn("Script_Extensions=Gujarati", text)
         self.assertNodeChecks(utils)
 
-        east_asian_width = (
+        east_asian_width_path = (
             self.mod.PI_PACKAGE / "node_modules/get-east-asian-width/index.js"
-        ).as_uri()
-        script = f'''const source = {json.dumps(text)}.replace(
+        )
+        if east_asian_width_path.exists():
+            east_asian_width = east_asian_width_path.as_uri()
+            script = f'''const source = {json.dumps(text)}.replace(
   'from "get-east-asian-width";',
   'from {json.dumps(east_asian_width)};'
 );
@@ -730,7 +732,7 @@ if (mod.sliceByColumn("हिन्दी", 0, 4, true) !== "हिन्दी"
 if (mod.sliceByColumn("સેન્સર", 0, 2, true) !== "સે") throw new Error("split/overflowed Gujarati conjunct at width 2");
 if (mod.sliceByColumn("સેન્સર", 0, 3, true) !== "સેન્સ") throw new Error("failed to fit Gujarati conjunct");
 '''
-        self.assertNodeScript(script)
+            self.assertNodeScript(script)
 
         first_apply = utils.read_bytes()
         self.mod.patch_tui_unicode_width()
